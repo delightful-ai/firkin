@@ -1,5 +1,9 @@
 //! Public API tests for the single-node runtime facade.
 
+#![cfg(any())]
+// Scaffolding: this runtime integration test depends on firkin-single-node.
+// It is disabled during the crates.io bootstrap to keep the publish graph acyclic.
+
 use std::path::PathBuf;
 use std::time::Duration;
 

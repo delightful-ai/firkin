@@ -6,6 +6,9 @@
 //! small in-repo compatibility harness.
 
 #![cfg(any())]
+// Scaffolding: this signed Apple/VZ integration suite also depends on
+// firkin-single-node. Keep it out of the default test graph until the live
+// harness moves under single-node or a dedicated unpublished test crate.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;

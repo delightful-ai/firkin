@@ -1,5 +1,9 @@
 //! Scheduler tests for the single-node runtime.
 
+#![cfg(any())]
+// Scaffolding: this runtime integration test depends on firkin-single-node.
+// It is disabled during the crates.io bootstrap to keep the publish graph acyclic.
+
 use firkin_single_node::{Error, SandboxResources, SingleNodeScheduler, SingleNodeSchedulerConfig};
 use firkin_types::Size;
 

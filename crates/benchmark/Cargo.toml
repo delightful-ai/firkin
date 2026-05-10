@@ -29,8 +29,6 @@ firkin-e2b-contract = { path = "../e2b-contract", version = "0.0.1-alpha" }
 firkin-e2b-server = { path = "../e2b-server", version = "0.0.1-alpha" }
 firkin-e2b-wire = { path = "../e2b-wire", version = "0.0.1-alpha" }
 firkin-envd = { path = "../envd", version = "0.0.1-alpha" }
-firkin-runtime = { path = "../runtime", version = "0.0.1-alpha" }
-firkin-single-node = { path = "../single-node", version = "0.0.1-alpha" }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,5 +1,9 @@
 //! Signed live pod autoscaling evidence.
 
+#![cfg(any())]
+// Scaffolding: this runtime integration test depends on firkin-single-node.
+// It is disabled during the crates.io bootstrap to keep the publish graph acyclic.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;

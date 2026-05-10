@@ -1,5 +1,9 @@
 //! Domain proxy tests for the single-node runtime facade.
 
+#![cfg(any())]
+// Scaffolding: this runtime integration test depends on firkin-single-node.
+// It is disabled during the crates.io bootstrap to keep the publish graph acyclic.
+
 use std::net::SocketAddr;
 
 use firkin_e2b_contract::{BackendError, PortTarget, RuntimeAdapter};

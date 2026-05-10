@@ -51,7 +51,6 @@ prost.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt"] }
-firkin-single-node = { path = "../single-node", version = "0.0.1-alpha" }
 
 [lints]
 workspace = true
