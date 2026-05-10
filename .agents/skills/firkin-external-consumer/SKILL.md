@@ -30,14 +30,14 @@ Use a compile-only smoke that does not boot a VM:
 use firkin::{Rootfs, RuntimeCapabilities, RuntimeCapability};
 use firkin::types::{ContainerId, Size};
 
+static SMOKE_CAPABILITIES: &[RuntimeCapability] = &[
+    RuntimeCapability::supported("compile", Some("consumer smoke")),
+];
+
 fn main() {
     let id = ContainerId::new("agent-1").unwrap();
     let rootfs = Rootfs::raw_block("/tmp/rootfs.img");
-    let caps = RuntimeCapabilities::new(
-        "external-smoke",
-        &[RuntimeCapability::supported("compile", Some("consumer smoke"))],
-        &[],
-    );
+    let caps = RuntimeCapabilities::new("external-smoke", SMOKE_CAPABILITIES, &[]);
 
     assert_eq!(id.as_str(), "agent-1");
     assert!(matches!(rootfs, Rootfs::RawBlock { .. }));
