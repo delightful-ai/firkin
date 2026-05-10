@@ -13,7 +13,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-publish-target
 
 jobs:
   publish:
@@ -21,6 +20,8 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 90
     environment: crates-io
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-publish-target
 
     steps:
       - name: Checkout

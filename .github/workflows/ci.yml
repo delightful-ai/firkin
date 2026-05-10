@@ -11,13 +11,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-target
 
 jobs:
   rust:
     name: Rust workspace
     runs-on: macos-14
     timeout-minutes: 35
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-target
 
     steps:
       - name: Checkout

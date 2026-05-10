@@ -11,13 +11,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-release-target
 
 jobs:
   draft:
     name: Draft release artifacts
     runs-on: macos-14
     timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-release-target
 
     steps:
       - name: Checkout
