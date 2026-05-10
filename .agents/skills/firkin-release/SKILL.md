@@ -63,9 +63,9 @@ firkin-vminitd-client
 firkin-e2b-contract
 firkin-e2b-server
 firkin-core
+firkin-benchmark
 firkin-runtime
 firkin-single-node
-firkin-benchmark
 firkin
 ```
 

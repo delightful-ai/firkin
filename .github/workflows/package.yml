@@ -65,8 +65,8 @@ jobs:
             firkin-e2b-contract
             firkin-e2b-server
             firkin-runtime
-            firkin-single-node
             firkin-benchmark
+            firkin-single-node
             firkin
           )
           for crate in "${crates[@]}"; do

@@ -44,8 +44,6 @@ firkin-e2b-wire = { path = "../e2b-wire", version = "0.0.1-alpha" }
 firkin-envd = { path = "../envd", version = "0.0.1-alpha" }
 
 [dev-dependencies]
-firkin-benchmark = { path = "../benchmark", version = "0.0.1-alpha" }
-firkin-evidence = { path = "../evidence", version = "0.0.1-alpha" }
 futures-util.workspace = true
 prost.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots"] }
