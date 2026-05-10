@@ -2229,6 +2229,12 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn asif_product_pod_store_converts_raw_ext4_and_removes_source() {
+        if !diskutil_supports_asif() {
+            eprintln!(
+                "warn: diskutil does not advertise ASIF support; skipping ASIF conversion probe"
+            );
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let options = PodStoreOptions {
             image_format: PodStoreImageFormat::Asif,
@@ -2243,6 +2249,19 @@ mod tests {
         assert!(path.exists());
         assert!(!temp.path().join("pod-store.raw.ext4").exists());
         assert!(std::fs::metadata(path).unwrap().len() > 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn diskutil_supports_asif() -> bool {
+        let Ok(output) = std::process::Command::new("diskutil")
+            .args(["image", "create", "from", "--help"])
+            .output()
+        else {
+            return false;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        stdout.contains("ASIF") || stderr.contains("ASIF")
     }
 
     #[test]
