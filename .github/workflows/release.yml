@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: /tmp/firkin-release-target
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout
