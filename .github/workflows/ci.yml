@@ -22,13 +22,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
 
-      - name: Install protobuf compiler
-        run: brew install protobuf
+      - name: Install native test tools
+        run: |
+          brew install protobuf e2fsprogs
+          echo "/opt/homebrew/opt/e2fsprogs/sbin" >> "$GITHUB_PATH"
+          echo "/usr/local/opt/e2fsprogs/sbin" >> "$GITHUB_PATH"
 
       - name: Cargo metadata
         run: cargo metadata --format-version 1

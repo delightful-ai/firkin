@@ -76,10 +76,10 @@ fn e2fsck_clean(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn debugfs_output(path: &std::path::Path, command: &str) -> Result<String, String> {
+fn debugfs_output(path: &std::path::Path, command: &str) -> Result<Option<String>, String> {
     let Some(bin) = debugfs_binary() else {
         eprintln!("warn: debugfs not found on PATH; skipping debugfs probe");
-        return Ok(String::new());
+        return Ok(None);
     };
     let out = Command::new(&bin)
         .args(["-R", command, path.to_str().unwrap()])
@@ -93,7 +93,7 @@ fn debugfs_output(path: &std::path::Path, command: &str) -> Result<String, Strin
             String::from_utf8_lossy(&out.stderr),
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
 }
 
 fn max_extent_depth(dump_extents: &str) -> Option<u16> {
@@ -223,7 +223,9 @@ fn depth_one_extent_fixture_passes_e2fsck_and_debugfs_reports_index_root() {
         fs.add_file("/big", &buf, 0o644).unwrap();
     });
     e2fsck_clean(img.path()).unwrap();
-    let dump = debugfs_output(img.path(), "dump_extents /big").unwrap();
+    let Some(dump) = debugfs_output(img.path(), "dump_extents /big").unwrap() else {
+        return;
+    };
     assert_eq!(
         max_extent_depth(&dump),
         Some(1),
@@ -241,7 +243,9 @@ fn whiteout_fixture_is_a_character_device_and_passes_e2fsck() {
         fs.add_whiteout("/upper/gone").unwrap();
     });
     e2fsck_clean(img.path()).unwrap();
-    let stat = debugfs_output(img.path(), "stat /upper/.wh.gone").unwrap();
+    let Some(stat) = debugfs_output(img.path(), "stat /upper/.wh.gone").unwrap() else {
+        return;
+    };
     assert!(
         stat.contains("Type: character special"),
         "expected a character special inode, got:\n{stat}"
@@ -258,7 +262,9 @@ fn opaque_dir_fixture_is_an_empty_regular_file_marker() {
         fs.add_opaque_dir("/upper").unwrap();
     });
     e2fsck_clean(img.path()).unwrap();
-    let stat = debugfs_output(img.path(), "stat /upper/.wh..wh..opq").unwrap();
+    let Some(stat) = debugfs_output(img.path(), "stat /upper/.wh..wh..opq").unwrap() else {
+        return;
+    };
     assert!(
         stat.contains("Type: regular"),
         "expected a regular inode, got:\n{stat}"
