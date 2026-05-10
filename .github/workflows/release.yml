@@ -15,7 +15,7 @@ env:
 jobs:
   draft:
     name: Draft release artifacts
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: /tmp/firkin-release-target
