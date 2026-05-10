@@ -1,0 +1,24 @@
+[package]
+name = "firkin-evidence"
+description = "Metric catalogs and scorecard validation for Firkin"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_evidence"
+path = "src/lib.rs"
+
+[dependencies]
+firkin-trace = { path = "../trace", version = "0.0.1-alpha" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

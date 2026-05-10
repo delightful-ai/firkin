@@ -1,0 +1,38 @@
+[package]
+name = "firkin-sandbox"
+description = "Public sandbox orchestration law surface for the firkin Rust containerization library"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_sandbox"
+path = "src/lib.rs"
+
+[features]
+default = []
+serde = ["dep:serde", "bytes/serde", "firkin-types/serde", "time/serde"]
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+base64.workspace = true
+firkin-types = { path = "../types", version = "0.0.1-alpha" }
+futures-core.workspace = true
+futures-util.workspace = true
+serde = { workspace = true, optional = true }
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

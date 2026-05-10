@@ -1,0 +1,5 @@
+error[E0599]: no method named `pty` found for struct `Process` in the current scope
+  --> tests/ui/stream_process_pty.rs:15:21
+   |
+15 |     let _ = process.pty();
+   |                     ^^^ private field, not a method

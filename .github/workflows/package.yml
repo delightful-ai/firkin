@@ -1,0 +1,73 @@
+name: Package dry run
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - ".github/workflows/package.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-package-target
+
+jobs:
+  package:
+    name: Cargo package
+    runs-on: macos-14
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Package independent crates with verification
+        run: |
+          set -euo pipefail
+          crates=(
+            firkin-artifacts
+            firkin-envd
+            firkin-trace
+            firkin-types
+          )
+          for crate in "${crates[@]}"; do
+            cargo package -p "$crate"
+          done
+          cargo package -p firkin-vminitd-bytes
+
+      - name: Package dependent crates without registry verification
+        run: |
+          set -euo pipefail
+          crates=(
+            firkin-vsock
+            firkin-ext4
+            firkin-oci
+            firkin-vminitd-client
+            firkin-sandbox
+            firkin-core
+            firkin-admission
+            firkin-hygiene
+            firkin-evidence
+            firkin-template
+            firkin-e2b-wire
+            firkin-e2b-contract
+            firkin-e2b-server
+            firkin-runtime
+            firkin-single-node
+            firkin-benchmark
+            firkin
+          )
+          for crate in "${crates[@]}"; do
+            cargo package -p "$crate"
+          done

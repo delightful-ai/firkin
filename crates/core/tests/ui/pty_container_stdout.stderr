@@ -1,0 +1,19 @@
+error[E0599]: no method named `stdout` found for struct `ContainerBuilder<ImplicitVm, ReadyPty>` in the current scope
+ --> tests/ui/pty_container_stdout.rs:9:10
+  |
+4 |       let _container = Container::builder("pty-container-stdout")
+  |                        ------------------------------------------
+  |                        |
+  |  ______________________method `stdout` is available on `ContainerBuilder<ImplicitVm>`
+  | |
+5 | |         .unwrap()
+  | |          -------- method `stdout` is available on `ContainerBuilder<ImplicitVm>`
+6 | |         .command(["/bin/sh"])
+  | |          -------------------- method `stdout` is available on `ContainerBuilder<ImplicitVm>`
+7 | |         .rootfs(Rootfs::ext4_image("/tmp/rootfs.ext4"))
+  | |          ---------------------------------------------- method `stdout` is available on `ContainerBuilder<ImplicitVm, firkin_core::Ready>`
+8 | |         .pty((80, 24))
+9 | |         .stdout(Stdio::piped())
+  | |         -^^^^^^ private field, not a method
+  | |_________|
+  |

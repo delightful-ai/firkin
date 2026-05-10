@@ -1,0 +1,30 @@
+[package]
+name = "firkin-trace"
+description = "Trace and benchmark sample primitives for the firkin Rust containerization library"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_trace"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+
+[lints]
+workspace = true

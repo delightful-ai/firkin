@@ -1,0 +1,27 @@
+[package]
+name = "SPIKE_NAME"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+objc2 = { path = "../../../vendor/github.com/madsmtm/objc2/crates/objc2" }
+objc2-foundation = { path = "../../../vendor/github.com/madsmtm/objc2/framework-crates/objc2-foundation", features = ["NSFileHandle", "NSURL", "NSString", "NSError", "NSArray"] }
+objc2-virtualization = { path = "../../../vendor/github.com/madsmtm/objc2/framework-crates/objc2-virtualization", features = ["dispatch2", "block2"] }
+block2 = { path = "../../../vendor/github.com/madsmtm/objc2/crates/block2" }
+dispatch2 = { path = "../../../vendor/github.com/madsmtm/objc2/crates/dispatch2", features = ["alloc", "objc2"] }
+
+# Add more deps as your spike needs them. Common additions:
+#   tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros"] }
+#   tokio-vsock = "0.7"   # guest-side vsock listener
+#   tonic = "0.12"
+#   prost = "0.13"
+#   hyper = "1"
+#   tower = "0.5"
+
+[profile.dev]
+opt-level = 0
+debug = 1
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,12 @@
+# Pinned vminitd artifact used by firkin-vminitd-bytes.
+#
+# The URLs are intentionally empty until there are real release assets to pin.
+# Local development builds use vminitd/bin/vminitd and verify it against this
+# SHA-256. Fresh clones without that local artifact fail loudly instead of
+# pretending a distribution path exists.
+revision = "local-apple-containerization-vminitd"
+target = "aarch64-unknown-linux-musl"
+sha256 = "dc5e68949543900fdeb00e11e19af0e5bd38b6a3564d7224aee40a1fdc0f64f3"
+vmexec_sha256 = "730be04cca82f249dd3eeb1cd654cbb758956e7818f74104f77264b932416cfc"
+vminitd_url = ""
+vmexec_url = ""

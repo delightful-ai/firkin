@@ -1,0 +1,28 @@
+[package]
+name = "firkin-template"
+description = "Template build execution for the firkin Rust containerization library"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_template"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+firkin-trace = { path = "../trace", version = "0.0.1-alpha" }
+thiserror.workspace = true
+firkin-artifacts = { path = "../artifacts", version = "0.0.1-alpha" }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

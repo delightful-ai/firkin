@@ -1,0 +1,45 @@
+[package]
+name = "firkin-core"
+description = "Container orchestration surface for the firkin Rust containerization library"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_core"
+path = "src/lib.rs"
+
+[features]
+default = []
+real-vm = ["snapshot"]
+snapshot = ["firkin-vmm/snapshot"]
+
+[dependencies]
+firkin-ext4 = { path = "../ext4", version = "0.0.1-alpha" }
+firkin-oci = { path = "../oci", version = "0.0.1-alpha" }
+firkin-types = { path = "../types", version = "0.0.1-alpha" }
+firkin-vminitd-bytes = { path = "../vminitd-bytes", version = "0.0.1-alpha" }
+firkin-vminitd-client = { path = "../vminitd-client", version = "0.0.1-alpha" }
+firkin-vmm = { path = "../vmm", version = "0.0.1-alpha" }
+firkin-vsock = { path = "../vsock", version = "0.0.1-alpha" }
+flate2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "rt", "sync", "time"] }
+tonic.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+trybuild.workspace = true
+
+[lints]
+workspace = true

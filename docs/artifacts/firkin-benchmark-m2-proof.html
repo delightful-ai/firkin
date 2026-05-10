@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Firkin Benchmark M2 Proof</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f7f6f8; --fg:#1a181d; --muted:#686270; --panel:#fff; --border:#dad4df; --ok:#0b7a3e; --code:#f0edf3; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#111016; --fg:#f2f0f5; --muted:#b8b0c0; --panel:#1a1720; --border:#37313e; --code:#25212b; } }
+    body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { max-width:1120px; margin:0 auto; padding:40px 22px 64px; }
+    h1,h2 { line-height:1.15; margin:0 0 12px; }
+    h1 { font-size:34px; }
+    h2 { font-size:22px; margin-top:30px; }
+    p { margin:0 0 14px; }
+    .lede { max-width:900px; color:var(--muted); font-size:17px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; margin-top:20px; }
+    .card, table { background:var(--panel); border:1px solid var(--border); border-radius:8px; }
+    .card { padding:16px; }
+    .status { display:inline-block; border-radius:999px; padding:3px 9px; font-size:12px; font-weight:700; color:white; background:var(--ok); }
+    table { width:100%; border-collapse:collapse; margin:16px 0 22px; overflow:hidden; }
+    th,td { text-align:left; vertical-align:top; padding:10px 12px; border-bottom:1px solid var(--border); }
+    th { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+    tr:last-child td { border-bottom:0; }
+    code,pre { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    pre { margin:12px 0 0; padding:13px; background:var(--code); border:1px solid var(--border); border-radius:6px; overflow-x:auto; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>M2: Trusted Signed-Live P0 Evidence</h1>
+  <p class="lede">Fresh signed-live evidence from 2026-05-07. Lifecycle and overhead artifacts now provide exact artifact-backed coverage for all 18 P0 scorecard metrics. Memory rows are exact only from the signed-live overhead artifact's exclusive VZ task-set collector; PSI is exact only from lifecycle artifact evidence containing guest <code>/proc/pressure/io</code>.</p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Status</h2>
+      <p><span class="status">18/18 exact</span></p>
+      <p>No proxy rows are accepted by strict coverage. Stale memory summaries from scorecard artifacts or old overhead artifacts do not promote memory rows.</p>
+    </section>
+    <section class="card">
+      <h2>Artifacts</h2>
+      <p><code>target/firkin-live-evidence/current-60s.json</code></p>
+      <p><code>target/firkin-live-evidence/overhead-60s.json</code></p>
+    </section>
+  </div>
+
+  <h2>Observable Behaviors</h2>
+  <table>
+    <thead><tr><th>Feature</th><th>Result</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>M2.1 exact <code>agent_task_ready_ms</code></td><td><span class="status">Pass</span></td><td>Signed-live lifecycle artifact contains three samples.</td></tr>
+      <tr><td>M2.1b startup/disk/density/reliability/cleanup P0s</td><td><span class="status">Pass</span></td><td>Lifecycle artifact contains exact signed-live rows for startup, exec, disk, PSI, density, reliability, and cleanup.</td></tr>
+      <tr><td>M2.1c memory P0s</td><td><span class="status">Pass</span></td><td>Overhead artifact contains three exact exclusive VZ task-set memory rows.</td></tr>
+      <tr><td>M2.2 percentile honesty</td><td><span class="status">Pass</span></td><td>Reports keep p50/p90/p95/p99/max and count; compare labels count=3 rows <code>smoke_only</code>.</td></tr>
+      <tr><td>M2.3 strict trust coverage</td><td><span class="status">Pass</span></td><td><code>coverage --strict</code> succeeds only with lifecycle plus overhead artifacts.</td></tr>
+      <tr><td>M2.4 overhead gate</td><td><span class="status">Pass</span></td><td><code>validate-overhead-slo</code> passes against <code>overhead-60s.json</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Evidence</h2>
+  <pre>$ cargo run -p firkin-cli -- benchmark run agent-core --mode signed-live --duration 60s --out target/firkin-live-evidence/current-60s.json
+benchmark_run=passed suite=agent-core mode=signed-live duration_seconds=60 repeats=3 artifact=target/firkin-live-evidence/current-60s.json
+
+$ cargo run -p firkin-cli -- benchmark run overhead --mode signed-live --duration 60s --out target/firkin-live-evidence/overhead-60s.json
+benchmark_run=passed suite=overhead mode=signed-live duration_seconds=60 repeats=3 artifact=target/firkin-live-evidence/overhead-60s.json
+
+$ cargo run -q -p firkin-cli -- benchmark coverage --strict --artifact target/firkin-live-evidence/current-60s.json --artifact target/firkin-live-evidence/overhead-60s.json
+manifest=firkin-benchmark-measurement-coverage-v1 p0_metrics=18 strict=true artifact=target/firkin-live-evidence/current-60s.json,target/firkin-live-evidence/overhead-60s.json artifact_kind=lifecycle,overhead
+metric=agent_task_ready_ms status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.mem.idle_host_footprint_bytes status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=overhead
+metric=sandbox.mem.post_task_residual_bytes status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=overhead
+metric=sandbox.mem.reclaim_effectiveness_ratio status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=overhead
+metric=sandbox.pressure.io_full_avg10 status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+
+$ cargo run -q -p firkin-cli -- benchmark validate-overhead-slo target/firkin-live-evidence/overhead-60s.json --min-samples 1
+benchmark_slo_gate=passed kind=overhead artifact=target/firkin-live-evidence/overhead-60s.json targets=5 min_samples=1</pre>
+</main>
+</body>
+</html>

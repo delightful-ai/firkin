@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v0.0.1-alpha*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-release-target
+
+jobs:
+  draft:
+    name: Draft release artifacts
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Build CLI without embedded runtime artifacts
+        run: cargo build -p firkin-cli --release
+
+      - name: Package facade tarball
+        run: cargo package -p firkin
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          cp "$CARGO_TARGET_DIR/release/fk" dist/fk-aarch64-apple-darwin
+          shasum -a 256 dist/* > dist/SHA256SUMS
+
+      - name: Create draft prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: true
+          make_latest: false
+          files: dist/*

@@ -1,0 +1,23 @@
+error[E0080]: evaluation panicked: id literal contains forbidden characters
+ --> tests/ui/bad_container_id.rs:4:13
+  |
+4 |     let _ = container_id!("bad/id");
+  |             ^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `main::_` failed inside this call
+  |
+note: inside `firkin_types::__validate_container_id_literal`
+ --> src/lib.rs
+  |
+  |     validate_id_literal(s);
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+note: inside `firkin_types::validate_id_literal`
+ --> $RUST/core/src/panic.rs
+  |
+  = note: the failure occurred here
+  |
+ ::: src/lib.rs
+  |
+  | /         assert!(
+  | |             is_id_byte(bytes[i]),
+  | |             "id literal contains forbidden characters"
+  | |         );
+  | |_________- in this macro invocation

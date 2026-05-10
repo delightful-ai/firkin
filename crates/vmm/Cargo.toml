@@ -1,0 +1,45 @@
+[package]
+name = "firkin-vmm"
+description = "Virtualization.framework VM primitives for the firkin Rust containerization library"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_vmm"
+path = "src/lib.rs"
+
+[features]
+default = []
+rosetta = []
+snapshot = []
+balloon = []
+
+[dependencies]
+block2.workspace = true
+dispatch2.workspace = true
+firkin-types = { path = "../types", version = "0.0.1-alpha" }
+firkin-vsock = { path = "../vsock", version = "0.0.1-alpha" }
+libc.workspace = true
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSArray", "NSData", "NSError", "NSFileHandle", "NSString", "NSURL"] }
+objc2-virtualization.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

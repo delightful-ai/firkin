@@ -1,0 +1,18 @@
+error[E0080]: evaluation panicked: hostname literal contains an empty or overlong label
+ --> tests/ui/bad_hostname.rs:4:13
+  |
+4 |     let _ = hostname!("web..local");
+  |             ^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `main::_` failed inside this call
+  |
+note: inside `firkin_types::__validate_hostname_literal`
+ --> $RUST/core/src/panic.rs
+  |
+  = note: the failure occurred here
+  |
+ ::: src/lib.rs
+  |
+  | /             assert!(
+  | |                 !(label_len == 0 || label_len > 63),
+  | |                 "hostname literal contains an empty or overlong label"
+  | |             );
+  | |_____________- in this macro invocation

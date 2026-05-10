@@ -1,0 +1,23 @@
+[package]
+name = "firkin-e2b-wire"
+description = "Wire-format helpers for Firkin's E2B-compatible surface"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_e2b_wire"
+path = "src/lib.rs"
+
+[dependencies]
+bytes.workspace = true
+firkin-types = { path = "../types", version = "0.0.1-alpha", features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+tar.workspace = true
+time = { workspace = true, features = ["formatting"] }

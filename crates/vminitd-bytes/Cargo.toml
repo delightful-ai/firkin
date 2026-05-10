@@ -1,0 +1,30 @@
+[package]
+name = "firkin-vminitd-bytes"
+description = "Pinned vminitd ELF bytes for the firkin Rust containerization library"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_vminitd_bytes"
+path = "src/lib.rs"
+
+[features]
+default = ["runtime-download"]
+runtime-download = []
+vendored-vminitd = []
+
+[build-dependencies]
+sha2.workspace = true
+ureq = "2"
+
+[dev-dependencies]
+sha2.workspace = true
+
+[lints]
+workspace = true

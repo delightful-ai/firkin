@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-target
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: macos-14
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Cargo metadata
+        run: cargo metadata --format-version 1
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Crate graph
+        run: scripts/check-firkin-crate-graph.sh
+
+      - name: Check
+        run: cargo check --workspace --all-targets
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Facade examples
+        run: cargo check -p firkin --examples

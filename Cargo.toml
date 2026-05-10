@@ -1,0 +1,66 @@
+[workspace]
+members = ["crates/admission", "crates/artifacts", "crates/benchmark", "crates/cli", "crates/core", "crates/e2b-contract", "crates/e2b-server", "crates/e2b-wire", "crates/envd", "crates/evidence", "crates/ext4", "crates/firkin", "crates/hygiene", "crates/oci", "crates/runtime", "crates/sandbox", "crates/single-node", "crates/template", "crates/trace", "crates/types", "crates/vminitd-bytes", "crates/vminitd-client", "crates/vmm", "crates/vsock"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/delightful-ai/firkin"
+homepage = "https://github.com/delightful-ai/firkin"
+documentation = "https://docs.rs/firkin"
+readme = "README.md"
+keywords = ["macos", "virtualization", "sandbox", "agent"]
+categories = ["virtualization", "development-tools"]
+rust-version = "1.95"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+smallvec = { version = "1", features = ["serde"] }
+oci-client = { version = "0.16.1", default-features = false, features = ["rustls-tls"] }
+thiserror = "2"
+trybuild = "1"
+uuid = { version = "1", features = ["v4"] }
+bitflags = "2"
+bytes = "1"
+bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
+tempfile = "3"
+tar = "0.4"
+flate2 = "1"
+zstd = "0.13"
+async-stream = "0.3"
+async-trait = "0.1"
+parking_lot = "0.12"
+base64 = "0.22"
+futures-core = "0.3"
+futures-util = "0.3"
+http = "1"
+http-body-util = "0.1"
+hyper = "1"
+hyper-util = "0.1"
+libc = "0.2"
+block2 = "0.6.2"
+dispatch2 = { version = "0.3.1", features = ["alloc", "objc2"] }
+objc2 = "0.6.4"
+objc2-foundation = "0.3.2"
+objc2-virtualization = { version = "0.3.2", features = ["dispatch2", "block2", "VZDirectoryShare", "VZDirectorySharingDeviceConfiguration", "VZGenericMachineIdentifier", "VZLinuxRosettaDirectoryShare", "VZMACAddress", "VZNetworkDeviceAttachment", "VZNetworkDeviceConfiguration", "VZNATNetworkDeviceAttachment", "VZVirtioFileSystemDeviceConfiguration", "VZVirtioNetworkDeviceConfiguration", "VZVmnetNetworkDeviceAttachment"] }
+prost = "0.13"
+prost-types = "0.13"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+tokio = "1"
+tokio-rustls = "0.26"
+time = "0.3"
+tonic = "0.12"
+tonic-build = "0.12"
+tower-service = "0.3"
+clap = "4"

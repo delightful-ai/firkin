@@ -1,0 +1,40 @@
+.DS_Store
+bin
+libexec
+.build
+target/
+.local
+xcuserdata/
+DerivedData/
+.swiftpm/
+.netrc
+.swiftpm
+workdir/
+installer/
+.venv/
+test_results/
+*.pid
+*.log
+*.pyc
+__pycache__/
+*.zip
+*.o
+*.ext4
+*.pkg
+*.swp
+*.tar.gz
+*.tar.xz
+vmlinux
+vendor/vminitd/**
+!vendor/vminitd/
+!vendor/vminitd/README.md
+
+# API docs for local preview only.
+_site/
+_serve/
+
+# Generated benchmark proof pages are local previews. Markdown sprint/proof
+# records under docs/artifacts/ are durable operator artifacts and stay
+# trackable.
+docs/artifacts/*.html
+!docs/artifacts/*.md

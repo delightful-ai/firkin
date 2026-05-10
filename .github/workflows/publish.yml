@@ -1,0 +1,67 @@
+name: Publish crates
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, for operator confirmation only"
+        required: true
+        default: "0.0.1-alpha"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-publish-target
+
+jobs:
+  publish:
+    name: Publish crates.io packages
+    runs-on: macos-14
+    timeout-minutes: 90
+    environment: crates-io
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          set -euo pipefail
+          crates=(
+            firkin-types
+            firkin-trace
+            firkin-artifacts
+            firkin-envd
+            firkin-vminitd-bytes
+            firkin-vsock
+            firkin-ext4
+            firkin-e2b-wire
+            firkin-vmm
+            firkin-sandbox
+            firkin-admission
+            firkin-hygiene
+            firkin-template
+            firkin-evidence
+            firkin-oci
+            firkin-vminitd-client
+            firkin-e2b-contract
+            firkin-e2b-server
+            firkin-core
+            firkin-runtime
+            firkin-single-node
+            firkin-benchmark
+            firkin
+          )
+          for crate in "${crates[@]}"; do
+            cargo publish -p "$crate"
+          done

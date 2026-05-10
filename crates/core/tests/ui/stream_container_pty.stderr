@@ -1,0 +1,5 @@
+error[E0599]: no method named `pty` found for struct `Container` in the current scope
+ --> tests/ui/stream_container_pty.rs:9:23
+  |
+9 |     let _ = container.pty();
+  |                       ^^^ private field, not a method

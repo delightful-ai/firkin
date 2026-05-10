@@ -1,0 +1,32 @@
+[package]
+name = "firkin-oci"
+description = "OCI image reference and bundle primitives for the firkin Rust containerization library"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_oci"
+path = "src/lib.rs"
+
+[dependencies]
+firkin-ext4 = { path = "../ext4", version = "0.0.1-alpha" }
+firkin-types = { path = "../types", version = "0.0.1-alpha", features = ["serde"] }
+oci-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

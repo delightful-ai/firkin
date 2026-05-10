@@ -1,0 +1,15 @@
+error[E0599]: no method named `stdout` found for struct `ExecConfigBuilder<CommandSetPty>` in the current scope
+ --> tests/ui/pty_exec_stdout.rs:7:10
+  |
+4 |       let _config = ExecConfig::builder()
+  |                     ---------------------
+  |                     |
+  |  ___________________method `stdout` is available on `ExecConfigBuilder<MissingCommand>`
+  | |
+5 | |         .command(["/bin/sh"])
+  | |          -------------------- method `stdout` is available on `ExecConfigBuilder<CommandSet>`
+6 | |         .pty((80, 24))
+7 | |         .stdout(Stdio::piped())
+  | |         -^^^^^^ private field, not a method
+  | |_________|
+  |

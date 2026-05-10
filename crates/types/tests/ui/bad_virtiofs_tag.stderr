@@ -1,0 +1,15 @@
+error[E0080]: evaluation panicked: virtiofs tag literal exceeds 36 bytes
+ --> tests/ui/bad_virtiofs_tag.rs:4:13
+  |
+4 |     let _ = virtiofs_tag!("this-tag-is-longer-than-thirty-six-bytes");
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `main::_` failed inside this call
+  |
+note: inside `firkin_types::__validate_virtiofs_tag_literal`
+ --> $RUST/core/src/panic.rs
+  |
+  = note: the failure occurred here
+  |
+ ::: src/lib.rs
+  |
+  |     assert!(bytes.len() <= 36, "virtiofs tag literal exceeds 36 bytes");
+  |     ------------------------------------------------------------------- in this macro invocation

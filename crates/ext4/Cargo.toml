@@ -1,0 +1,31 @@
+[package]
+name = "firkin-ext4"
+description = "EXT4 image writer for the firkin Rust containerization library"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_ext4"
+path = "src/lib.rs"
+
+[dependencies]
+bitflags.workspace = true
+bytemuck.workspace = true
+firkin-types = { path = "../types", version = "0.0.1-alpha" }
+flate2.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

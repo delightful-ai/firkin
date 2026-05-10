@@ -1,0 +1,38 @@
+[package]
+name = "firkin-e2b-server"
+description = "Local E2B-compatible server components for Firkin"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_e2b_server"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+firkin-types = { path = "../types", version = "0.0.1-alpha", features = ["serde"] }
+flate2.workspace = true
+http-body-util = { workspace = true, features = ["channel"] }
+hyper = { workspace = true, features = ["client", "http1", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+prost.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+time = { workspace = true, features = ["formatting"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "sync", "time"] }
+tokio-rustls.workspace = true
+firkin-e2b-wire = { path = "../e2b-wire", version = "0.0.1-alpha" }
+firkin-e2b-contract = { path = "../e2b-contract", version = "0.0.1-alpha" }
+firkin-envd = { path = "../envd", version = "0.0.1-alpha" }

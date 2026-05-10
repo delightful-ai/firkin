@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Firkin Benchmark M3 Proof</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f7f6f8; --fg:#1a181d; --muted:#686270; --panel:#fff; --border:#dad4df; --ok:#0b7a3e; --warn:#9b6500; --code:#f0edf3; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#111016; --fg:#f2f0f5; --muted:#b8b0c0; --panel:#1a1720; --border:#37313e; --code:#25212b; } }
+    body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { max-width:1120px; margin:0 auto; padding:40px 22px 64px; }
+    h1,h2 { line-height:1.15; margin:0 0 12px; }
+    h1 { font-size:34px; }
+    h2 { font-size:22px; margin-top:30px; }
+    p { margin:0 0 14px; }
+    .lede { max-width:900px; color:var(--muted); font-size:17px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; margin-top:20px; }
+    .card, table { background:var(--panel); border:1px solid var(--border); border-radius:8px; }
+    .card { padding:16px; }
+    .status { display:inline-block; border-radius:999px; padding:3px 9px; font-size:12px; font-weight:700; color:white; background:var(--warn); }
+    .pass { background:var(--ok); }
+    table { width:100%; border-collapse:collapse; margin:16px 0 22px; overflow:hidden; }
+    th,td { text-align:left; vertical-align:top; padding:10px 12px; border-bottom:1px solid var(--border); }
+    th { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+    tr:last-child td { border-bottom:0; }
+    code,pre { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    pre { margin:12px 0 0; padding:13px; background:var(--code); border:1px solid var(--border); border-radius:6px; overflow-x:auto; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>M3: Sprint-Ready Optimization Loop</h1>
+  <p class="lede">Fresh signed-live proof from 2026-05-07. The retained artifacts are <code>current-60s.json</code> and <code>overhead-60s.json</code>. Doctor, 60s lifecycle, 60s overhead, strict P0 coverage, overhead SLO, baseline save/compare, and sprint-ready all execute end to end. Coverage reports all 18 P0 metrics as exact from artifact evidence; smoke confidence is still explicit because sample counts are three.</p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Status</h2>
+      <p><span class="status pass">Sprint-ready passed</span></p>
+      <p>Memory attribution is now exact for the overhead harness by excluding setup VZ task IDs and summing the measured exclusive <code>com.apple.Virtualization.VirtualMachine</code> task set. PSI is exact because the rebuilt <code>bin/vmlinux</code> emits guest <code>/proc/pressure/io</code> samples.</p>
+    </section>
+    <section class="card">
+      <h2>Artifacts</h2>
+      <p><code>target/firkin-live-evidence/current-60s.json</code></p>
+      <p><code>target/firkin-live-evidence/overhead-60s.json</code></p>
+      <p><code>~/.firkin/benchmarks/baselines/local-agent-core-60s.json</code></p>
+    </section>
+  </div>
+
+  <h2>Observable Behaviors</h2>
+  <table>
+    <thead><tr><th>Feature</th><th>Result</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>M3.1 baseline save/compare</td><td><span class="status pass">Pass</span></td><td><code>benchmark_baseline=saved name=local-agent-core-60s</code> and compare ranks bottlenecks with owner crates and <code>smoke_only</code> confidence.</td></tr>
+      <tr><td>M3.2 60s signed-live lifecycle</td><td><span class="status pass">Pass</span></td><td><code>benchmark_run=passed suite=agent-core mode=signed-live duration_seconds=60 repeats=3</code>.</td></tr>
+      <tr><td>M3.2 60s signed-live overhead</td><td><span class="status pass">Pass</span></td><td><code>benchmark_run=passed suite=overhead mode=signed-live duration_seconds=60 repeats=3</code>.</td></tr>
+      <tr><td>M3.3 strict coverage</td><td><span class="status pass">Pass</span></td><td>All 18 P0 rows report <code>status=signed_live_exact</code> from lifecycle or overhead artifacts.</td></tr>
+      <tr><td>M3.4 sprint readiness</td><td><span class="status pass">Pass</span></td><td><code>sprint-ready=passed suite=agent-core mode=signed-live baseline=.../local-agent-core-60s.json</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Commands</h2>
+  <pre>$ cargo run -p firkin-cli -- benchmark run agent-core --mode signed-live --duration 60s --out target/firkin-live-evidence/current-60s.json
+benchmark_run=passed suite=agent-core mode=signed-live duration_seconds=60 repeats=3 artifact=target/firkin-live-evidence/current-60s.json
+
+$ cargo run -p firkin-cli -- benchmark run overhead --mode signed-live --duration 60s --out target/firkin-live-evidence/overhead-60s.json
+benchmark_run=passed suite=overhead mode=signed-live duration_seconds=60 repeats=3 artifact=target/firkin-live-evidence/overhead-60s.json
+
+$ cargo run -q -p firkin-cli -- benchmark baseline save target/firkin-live-evidence/current-60s.json --name local-agent-core-60s
+benchmark_baseline=saved name=local-agent-core-60s source=target/firkin-live-evidence/current-60s.json path=/Users/darin/.firkin/benchmarks/baselines/local-agent-core-60s.json</pre>
+
+  <h2>Strict Coverage</h2>
+  <pre>$ cargo run -q -p firkin-cli -- benchmark coverage --strict --artifact target/firkin-live-evidence/current-60s.json --artifact target/firkin-live-evidence/overhead-60s.json
+manifest=firkin-benchmark-measurement-coverage-v1 p0_metrics=18 strict=true artifact=target/firkin-live-evidence/current-60s.json,target/firkin-live-evidence/overhead-60s.json artifact_kind=lifecycle,overhead
+metric=agent_task_ready_ms status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.start.warm_ready_ms status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.start.cold_ready_ms status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.start.hot_pool_checkout_ms status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.exec.first_latency_ms status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.exec.first_stdout_ms status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.disk.metadata_create_stat_unlink_ms status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.disk.fsync_p99_us status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.mem.idle_host_footprint_bytes status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=overhead
+metric=sandbox.mem.post_task_residual_bytes status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=overhead
+metric=sandbox.mem.reclaim_effectiveness_ratio status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=overhead
+metric=sandbox.pressure.io_full_avg10 status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.disk.sparse_bloat_ratio status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.disk.trim_reclaim_bytes_per_sec status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.density.max_active_before_p95_doubles status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.reliability.boot_failure_rate status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.reliability.unknown_failure_rate status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle
+metric=sandbox.cleanup.leftover_bytes status=signed_live_exact artifact_status=present artifact_count=3 artifact_kind=lifecycle</pre>
+
+  <h2>Sprint Gate</h2>
+  <pre>$ cargo run -q -p firkin-cli -- benchmark sprint-ready --suite agent-core --baseline local-agent-core-60s --mode signed-live --current-artifact target/firkin-live-evidence/current-60s.json --overhead-artifact target/firkin-live-evidence/overhead-60s.json --min-free-bytes 0
+benchmark_slo_gate=passed kind=overhead artifact=target/firkin-live-evidence/overhead-60s.json targets=5 min_samples=1
+benchmark_compare=summary rank=bottlenecks baseline=/Users/darin/.firkin/benchmarks/baselines/local-agent-core-60s.json current=target/firkin-live-evidence/current-60s.json baseline_kind=lifecycle current_kind=lifecycle matched_metrics=23
+metric=sandbox.start.cold_ready_ms owner=firkin-runtime/firkin-single-node count=3 current_p95=22989.581125 confidence=smoke_only
+metric=sandbox.disk.fsync_p99_us owner=firkin-oci/firkin-template/firkin-core count=3 current_p95=9583.542000000556 confidence=smoke_only
+metric=sandbox.start.warm_ready_ms owner=firkin-runtime/firkin-single-node count=3 current_p95=7187.460542 confidence=smoke_only
+sprint-ready=passed suite=agent-core mode=signed-live baseline=/Users/darin/.firkin/benchmarks/baselines/local-agent-core-60s.json first_command="fk benchmark run agent-core --mode signed-live --duration 30s --out target/firkin-live-evidence/current-30s.json"</pre>
+</main>
+</body>
+</html>

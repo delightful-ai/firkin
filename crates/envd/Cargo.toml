@@ -1,0 +1,20 @@
+[package]
+name = "firkin-envd"
+description = "Protocol-level envd process and filesystem contracts for Firkin data planes"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_envd"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["sync"] }

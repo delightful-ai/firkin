@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="420" viewBox="0 0 1080 420" role="img" aria-labelledby="title desc">
+  <title id="title">Firkin architecture overview</title>
+  <desc id="desc">Rust facade, sandbox API, runtime, and Apple Virtualization layers for macOS agent sandboxes.</desc>
+  <rect width="1080" height="420" fill="#101418"/>
+  <rect x="48" y="56" width="984" height="308" rx="18" fill="#182026" stroke="#32414b" stroke-width="2"/>
+  <text x="72" y="102" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="24" fill="#eef5f7">Firkin 0.0.1-alpha</text>
+  <text x="72" y="132" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#9fb0ba">Rust-first macOS agent sandbox library</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">
+    <rect x="72" y="178" width="178" height="72" rx="10" fill="#d7f9f1"/>
+    <text x="100" y="220" fill="#11201d">firkin facade</text>
+    <rect x="298" y="178" width="178" height="72" rx="10" fill="#f8e6a0"/>
+    <text x="322" y="220" fill="#221c08">sandbox API</text>
+    <rect x="524" y="178" width="178" height="72" rx="10" fill="#bad8ff"/>
+    <text x="552" y="220" fill="#0b1b31">runtime graph</text>
+    <rect x="750" y="178" width="234" height="72" rx="10" fill="#ffcec7"/>
+    <text x="776" y="220" fill="#30100b">Apple VZ + vminitd</text>
+    <path d="M250 214h48M476 214h48M702 214h48" stroke="#d8e6eb" stroke-width="4" marker-end="url(#arrow)"/>
+    <rect x="116" y="288" width="824" height="42" rx="8" fill="#22303a"/>
+    <text x="148" y="315" fill="#d8e6eb">typed evidence | E2B-compatible contracts | VM snapshots | benchmark gates</text>
+  </g>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#d8e6eb"/>
+    </marker>
+  </defs>
+</svg>

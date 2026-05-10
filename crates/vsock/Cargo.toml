@@ -1,0 +1,31 @@
+[package]
+name = "firkin-vsock"
+description = "Async vsock stream primitives for the firkin Rust containerization library"
+version = "0.0.1-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "firkin_vsock"
+path = "src/lib.rs"
+
+[dependencies]
+async-stream.workspace = true
+firkin-types = { path = "../types", version = "0.0.1-alpha" }
+futures-core.workspace = true
+http.workspace = true
+hyper-util = { workspace = true, features = ["tokio"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "sync"] }
+tower-service.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync"] }
+
+[lints]
+workspace = true
