@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 90
     environment: crates-io
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-publish-target
+      CARGO_TARGET_DIR: /tmp/firkin-publish-target
 
     steps:
       - name: Checkout

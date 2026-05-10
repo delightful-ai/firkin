@@ -18,7 +18,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 45
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/firkin-release-target
+      CARGO_TARGET_DIR: /tmp/firkin-release-target
 
     steps:
       - name: Checkout
