@@ -28,7 +28,7 @@ firkin-template = { path = "../template", version = "0.0.1-alpha" }
 firkin-trace = { path = "../trace", version = "0.0.1-alpha" }
 firkin-types = { path = "../types", version = "0.0.1-alpha" }
 firkin-vminitd-bytes = { path = "../vminitd-bytes", version = "0.0.1-alpha" }
-firkin-vmm = { path = "../vmm", version = "0.0.1-alpha" }
+firkin-vmm = { path = "../vmm", version = "0.0.1-alpha.1" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

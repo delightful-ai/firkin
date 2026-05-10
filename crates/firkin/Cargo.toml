@@ -34,7 +34,7 @@ firkin-trace = { path = "../trace", version = "0.0.1-alpha" }
 firkin-types = { path = "../types", version = "0.0.1-alpha" }
 firkin-vminitd-bytes = { path = "../vminitd-bytes", version = "0.0.1-alpha" }
 firkin-vminitd-client = { path = "../vminitd-client", version = "0.0.1-alpha" }
-firkin-vmm = { path = "../vmm", version = "0.0.1-alpha" }
+firkin-vmm = { path = "../vmm", version = "0.0.1-alpha.1" }
 firkin-vsock = { path = "../vsock", version = "0.0.1-alpha" }
 firkin-admission = { path = "../admission", version = "0.0.1-alpha" }
 firkin-artifacts = { path = "../artifacts", version = "0.0.1-alpha" }
