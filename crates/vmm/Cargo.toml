@@ -1,14 +1,11 @@
 [package]
 name = "firkin-vmm"
 description = "Virtualization.framework VM primitives for the firkin Rust containerization library"
-version = "0.0.1-alpha.1"
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
 
 [lib]
 name = "firkin_vmm"
@@ -23,8 +20,8 @@ balloon = []
 [dependencies]
 block2.workspace = true
 dispatch2.workspace = true
-firkin-types = { path = "../types", version = "0.0.1-alpha" }
-firkin-vsock = { path = "../vsock", version = "0.0.1-alpha" }
+firkin-types = { path = "../types", version = "0.1.0" }
+firkin-vsock = { path = "../vsock", version = "0.1.0" }
 libc.workspace = true
 objc2.workspace = true
 objc2-foundation = { workspace = true, features = ["NSArray", "NSData", "NSError", "NSFileHandle", "NSString", "NSURL"] }

@@ -6,6 +6,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU32, AtomicU64, Ordering},
 };
+use std::time::Instant;
 
 use async_trait::async_trait;
 use firkin_core::{
@@ -13,6 +14,7 @@ use firkin_core::{
     PodStoreSpec, Process, ProcessKillHandle, PtyConfig, Rootfs, Signal, Stdio, User,
 };
 use firkin_ext4::Writer;
+use firkin_trace::{BenchmarkMetricKind, BenchmarkSample, BenchmarkUnit};
 use firkin_types::{BlockDeviceId, SandboxNetworkPolicy, Size};
 use firkin_vmm::{DiskImageConversion, KernelImage, VmConfig, VmConfigBuilder, convert_disk_image};
 use time::format_description::well_known::Rfc3339;
@@ -59,6 +61,7 @@ pub struct AppleVzLocalRuntimeDriver {
     snapshot_dir: Arc<PathBuf>,
     sandboxes: Arc<Mutex<HashMap<String, AppleVzRuntimeSandbox>>>,
     pods: Arc<Mutex<HashMap<String, Arc<Mutex<AppleVzRuntimePod>>>>>,
+    pod_container_add_samples: Arc<Mutex<Vec<BenchmarkSample>>>,
     next_adapter_sandbox: Arc<AtomicU64>,
     next_pod: Arc<AtomicU64>,
 }
@@ -76,6 +79,25 @@ struct AppleVzRuntimePod {
     pod_store_path: PathBuf,
     trim_policy: PodTrimPolicy,
     templates: HashMap<String, firkin_oci::ImageBundle>,
+}
+
+fn pod_container_add_phase_sample(
+    phase: &'static str,
+    elapsed: std::time::Duration,
+    pod_id: &str,
+    container: &PodContainerCreateRequest,
+) -> BenchmarkSample {
+    BenchmarkSample::new(
+        format!("debug.single_node.pod_container_add_{phase}_ms"),
+        BenchmarkMetricKind::LifecycleLatency,
+        BenchmarkUnit::Milliseconds,
+        elapsed.as_secs_f64() * 1000.0,
+    )
+    .with_static_tag("measurement_boundary", "single_node_pod_container_add")
+    .with_static_tag("phase", phase)
+    .with_dynamic_tag("pod_id", pod_id.to_owned())
+    .with_dynamic_tag("container_name", container.name.clone())
+    .with_dynamic_tag("template_id", container.template_id.clone())
 }
 
 #[cfg_attr(any(not(test), not(feature = "snapshot")), allow(dead_code))]
@@ -128,9 +150,19 @@ impl AppleVzLocalRuntimeDriver {
             snapshot_dir: Arc::new(snapshot_dir.into()),
             sandboxes: Arc::new(Mutex::new(HashMap::new())),
             pods: Arc::new(Mutex::new(HashMap::new())),
+            pod_container_add_samples: Arc::new(Mutex::new(Vec::new())),
             next_adapter_sandbox: Arc::new(AtomicU64::new(0)),
             next_pod: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Return debug phase samples recorded by pod container add operations.
+    ///
+    /// The samples are diagnostic attribution, not scorecard proof. Callers can
+    /// diff offsets before and after a benchmark level to derive per-level
+    /// phase summaries without re-timing the backend boundary.
+    pub async fn pod_container_add_benchmark_samples(&self) -> Vec<BenchmarkSample> {
+        self.pod_container_add_samples.lock().await.clone()
     }
 
     async fn pod_handle(&self, pod_id: &str) -> Result<Arc<Mutex<AppleVzRuntimePod>>> {
@@ -1081,6 +1113,8 @@ impl RuntimeAdapter for AppleVzLocalRuntimeDriver {
         pod_id: &str,
         container: PodContainerCreateRequest,
     ) -> std::result::Result<PodContainerInfo, E2bBackendError> {
+        let total_started = Instant::now();
+        let template_lookup_started = Instant::now();
         let existing_bundle = {
             let pod = self.pod_handle_for_adapter(pod_id).await?;
             let runtime_pod = pod.lock().await;
@@ -1093,9 +1127,13 @@ impl RuntimeAdapter for AppleVzLocalRuntimeDriver {
                 .await
                 .map_err(single_node_to_backend_error)?,
         };
+        let template_lookup_elapsed = template_lookup_started.elapsed();
+        let spec_build_started = Instant::now();
         let spec = Self::pod_container_spec(&container, bundle.clone())
             .map_err(single_node_to_backend_error)?;
+        let spec_build_elapsed = spec_build_started.elapsed();
         let pod = self.pod_handle_for_adapter(pod_id).await?;
+        let begin_started = Instant::now();
         let pending = {
             let mut runtime_pod = pod.lock().await;
             runtime_pod
@@ -1106,7 +1144,9 @@ impl RuntimeAdapter for AppleVzLocalRuntimeDriver {
                     E2bBackendError::Runtime(format!("add Apple/VZ pod container: {error}"))
                 })?
         };
+        let begin_elapsed = begin_started.elapsed();
         let pending_id = pending.id().clone();
+        let prepare_started = Instant::now();
         let prepared = match pending.prepare().await {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -1117,6 +1157,8 @@ impl RuntimeAdapter for AppleVzLocalRuntimeDriver {
                 )));
             }
         };
+        let prepare_elapsed = prepare_started.elapsed();
+        let start_started = Instant::now();
         let started = match prepared.start().await {
             Ok(started) => started,
             Err(error) => {
@@ -1127,6 +1169,9 @@ impl RuntimeAdapter for AppleVzLocalRuntimeDriver {
                 )));
             }
         };
+        let start_elapsed = start_started.elapsed();
+        let startup_timing = started.startup_timing();
+        let commit_started = Instant::now();
         {
             let mut runtime_pod = pod.lock().await;
             runtime_pod
@@ -1140,6 +1185,82 @@ impl RuntimeAdapter for AppleVzLocalRuntimeDriver {
                 .entry(container.template_id.clone())
                 .or_insert(bundle);
         }
+        let commit_elapsed = commit_started.elapsed();
+        let total_elapsed = total_started.elapsed();
+        self.pod_container_add_samples.lock().await.extend([
+            pod_container_add_phase_sample(
+                "template_lookup",
+                template_lookup_elapsed,
+                pod_id,
+                &container,
+            ),
+            pod_container_add_phase_sample("spec_build", spec_build_elapsed, pod_id, &container),
+            pod_container_add_phase_sample("begin", begin_elapsed, pod_id, &container),
+            pod_container_add_phase_sample("prepare", prepare_elapsed, pod_id, &container),
+            pod_container_add_phase_sample("start", start_elapsed, pod_id, &container),
+            pod_container_add_phase_sample(
+                "start_spec_build",
+                startup_timing.spec_build(),
+                pod_id,
+                &container,
+            ),
+            pod_container_add_phase_sample(
+                "start_vminitd_connect",
+                startup_timing.vminitd_connect(),
+                pod_id,
+                &container,
+            ),
+            pod_container_add_phase_sample(
+                "start_socket_relays",
+                startup_timing.socket_relays(),
+                pod_id,
+                &container,
+            ),
+            pod_container_add_phase_sample(
+                "start_stdio_prepare",
+                startup_timing.stdio_prepare(),
+                pod_id,
+                &container,
+            ),
+            pod_container_add_phase_sample(
+                "start_config_write_rpc",
+                startup_timing.config_write_rpc(),
+                pod_id,
+                &container,
+            ),
+            pod_container_add_phase_sample(
+                "start_request_encode",
+                startup_timing.request_encode(),
+                pod_id,
+                &container,
+            ),
+            pod_container_add_phase_sample(
+                "start_create_process_rpc",
+                startup_timing.create_process_rpc(),
+                pod_id,
+                &container,
+            ),
+            pod_container_add_phase_sample(
+                "start_gate_wait",
+                startup_timing.start_gate_wait(),
+                pod_id,
+                &container,
+            ),
+            pod_container_add_phase_sample(
+                "start_process_rpc",
+                startup_timing.start_process_rpc(),
+                pod_id,
+                &container,
+            ),
+            pod_container_add_phase_sample(
+                "start_total",
+                startup_timing.total(),
+                pod_id,
+                &container,
+            ),
+            pod_container_add_phase_sample("commit", commit_elapsed, pod_id, &container),
+            pod_container_add_phase_sample("total", total_elapsed, pod_id, &container),
+        ]);
         Ok(PodContainerInfo::running(&container))
     }
 
@@ -2229,12 +2350,6 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn asif_product_pod_store_converts_raw_ext4_and_removes_source() {
-        if !diskutil_supports_asif() {
-            eprintln!(
-                "warn: diskutil does not advertise ASIF support; skipping ASIF conversion probe"
-            );
-            return;
-        }
         let temp = tempfile::tempdir().unwrap();
         let options = PodStoreOptions {
             image_format: PodStoreImageFormat::Asif,
@@ -2249,19 +2364,6 @@ mod tests {
         assert!(path.exists());
         assert!(!temp.path().join("pod-store.raw.ext4").exists());
         assert!(std::fs::metadata(path).unwrap().len() > 0);
-    }
-
-    #[cfg(target_os = "macos")]
-    fn diskutil_supports_asif() -> bool {
-        let Ok(output) = std::process::Command::new("diskutil")
-            .args(["image", "create", "from", "--help"])
-            .output()
-        else {
-            return false;
-        };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        stdout.contains("ASIF") || stderr.contains("ASIF")
     }
 
     #[test]

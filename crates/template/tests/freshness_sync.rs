@@ -43,7 +43,6 @@ fn committed_repo() -> tempfile::TempDir {
     let source = tempfile::tempdir().expect("source");
     fs::write(source.path().join("README.md"), "template").expect("readme");
     run_git(["init", "--quiet"], source.path());
-    run_git(["checkout", "-B", "main"], source.path());
     run_git(["add", "."], source.path());
     run_git_commit("init", source.path());
     source

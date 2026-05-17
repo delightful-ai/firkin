@@ -11,11 +11,11 @@ fn decision_grade_contract_names_endpoints_and_sample_floors_are_canonical() {
         .map(|metric| metric.metric())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(contract.len(), 14);
+    assert_eq!(contract.len(), 13);
     assert!(names.contains("start.hot_to_first_stdout_ms"));
     assert!(names.contains("pool.lease_ms"));
-    assert!(names.contains("exec.first_stdout_byte_ms"));
-    assert!(names.contains("density.max_active_before_hot_to_first_stdout_p95_doubles"));
+    assert!(names.contains("exec.direct_first_stdout_byte_ms"));
+    assert!(names.contains("density.max_active_before_retained_shell_first_stdout_p95_doubles"));
     assert!(names.contains("disk.sparse_bloat_after_trim"));
 
     for legacy in [

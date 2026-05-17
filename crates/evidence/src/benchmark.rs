@@ -33,6 +33,8 @@ pub enum PercentileAvailability {
     SuperfastIteration,
     /// At least five samples. Values are useful for fast local iteration.
     FastIteration,
+    /// At least ten samples. Values are useful as a before/after checkpoint.
+    BaselineCheckpoint,
     /// At least thirty samples. p50 and p90 are suitable for development iteration.
     P50P90DecisionGrade,
     /// At least the metric p95 sample floor. p95 is suitable for decision-grade comparison.
@@ -61,6 +63,8 @@ impl PercentileAvailability {
             Self::P95DecisionGrade
         } else if count >= 30 {
             Self::P50P90DecisionGrade
+        } else if count >= 10 {
+            Self::BaselineCheckpoint
         } else if count >= 5 {
             Self::FastIteration
         } else if count >= 3 {
@@ -77,6 +81,7 @@ impl PercentileAvailability {
             Self::SmokeOnly => "smoke_only",
             Self::SuperfastIteration => "superfast_iteration",
             Self::FastIteration => "fast_iteration",
+            Self::BaselineCheckpoint => "baseline_checkpoint",
             Self::P50P90DecisionGrade => "p50_p90_decision_grade",
             Self::P95DecisionGrade => "p95_decision_grade",
             Self::P99DecisionGrade => "p99_decision_grade",
@@ -91,6 +96,7 @@ impl PercentileAvailability {
             Self::SmokeOnly
                 | Self::SuperfastIteration
                 | Self::FastIteration
+                | Self::BaselineCheckpoint
                 | Self::P50P90DecisionGrade
         )
     }
@@ -103,6 +109,7 @@ impl PercentileAvailability {
             Self::SmokeOnly
             | Self::SuperfastIteration
             | Self::FastIteration
+            | Self::BaselineCheckpoint
             | Self::P50P90DecisionGrade => "unstable",
         }
     }
@@ -115,6 +122,7 @@ impl PercentileAvailability {
             Self::SmokeOnly
             | Self::SuperfastIteration
             | Self::FastIteration
+            | Self::BaselineCheckpoint
             | Self::P50P90DecisionGrade
             | Self::P95DecisionGrade => "experimental",
         }
@@ -358,6 +366,26 @@ mod tests {
         );
         assert_eq!(summary.percentile_availability().as_str(), "fast_iteration");
         assert!(summary.percentile_availability().unstable_percentile());
+    }
+
+    #[test]
+    fn benchmark_summary_marks_baseline_checkpoint_sample_floor() {
+        let summary = BenchmarkSummary::from_samples(
+            "start.hot_to_first_stdout_ms",
+            (1..=10_u32).map(|value| sample(f64::from(value))),
+        )
+        .expect("summary");
+
+        assert_eq!(
+            summary.percentile_availability(),
+            PercentileAvailability::BaselineCheckpoint
+        );
+        assert_eq!(
+            summary.percentile_availability().as_str(),
+            "baseline_checkpoint"
+        );
+        assert!(summary.percentile_availability().unstable_percentile());
+        assert_eq!(summary.percentile_availability().p95_status(), "unstable");
     }
 
     #[test]

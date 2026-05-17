@@ -32,8 +32,8 @@ use crate::pod::store::{MountedPodStore, PodStoreSpec};
 use crate::vm_attach::CoreContainerFactory as _;
 #[allow(unused_imports)]
 use crate::{
-    Container, Error, ExitStatus, GuestPath, IntoContainerId, Mount, Output, Streams, VmRootfs,
-    VminitdClient, runtime_rpc_error,
+    Container, ContainerStartupTiming, Error, ExitStatus, GuestPath, IntoContainerId, Mount,
+    Output, Streams, VmRootfs, VminitdClient, runtime_rpc_error,
 };
 #[allow(unused_imports)]
 use crate::{
@@ -333,6 +333,12 @@ impl StartedPodContainerAdd {
     #[must_use]
     pub const fn id(&self) -> &ContainerId {
         &self.id
+    }
+
+    /// Return host-side phase timing for the started container init process.
+    #[must_use]
+    pub const fn startup_timing(&self) -> ContainerStartupTiming {
+        self.container.startup_timing()
     }
 }
 /// A validated pod `emptyDir` write that can run without borrowing pod state.

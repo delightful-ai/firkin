@@ -1,9 +1,5 @@
 //! Single-node backend orchestration tests.
 
-#![cfg(any())]
-// Scaffolding: this runtime integration test depends on firkin-single-node.
-// It is disabled during the crates.io bootstrap to keep the publish graph acyclic.
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;

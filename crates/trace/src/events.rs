@@ -109,6 +109,8 @@ pub enum LifecycleClass {
 pub enum WorkloadClass {
     /// Tiny command that writes a known stdout payload.
     TinyExec,
+    /// Direct argv tiny command without shell startup.
+    DirectExec,
     /// Shell command startup workload.
     ShellExec,
     /// One hundred tiny commands in one ready sandbox.

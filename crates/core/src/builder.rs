@@ -26,12 +26,12 @@ use crate::rootfs::{Rootfs, RootfsChoice, StagedRootfs, VmRootfs};
 use crate::runtime::is_transient_vmnet_boot_error;
 #[allow(unused_imports)]
 use crate::runtime::{
-    Container, ContainerRuntime, FixedStreamTask, RuntimeStaging, VminitdClient, accept_pty,
-    allocate_vm_stdio_port, block_device_guest_path, configure_container_name_files,
-    configure_guest_networks, connect_vminitd, mount_container_rootfs,
-    mount_file_mount_holding_dirs, prepare_socket_relays, runtime_vminitd_error, runtime_vmm_error,
-    standard_guest_setup, start_implicit_container, start_implicit_container_pty,
-    start_implicit_container_with_staging,
+    Container, ContainerRuntime, ContainerStartupTiming, FixedStreamTask, RuntimeStaging,
+    VminitdClient, accept_pty, allocate_vm_stdio_port, block_device_guest_path,
+    configure_container_name_files, configure_guest_networks, connect_vminitd,
+    mount_container_rootfs, mount_file_mount_holding_dirs, prepare_socket_relays,
+    runtime_vminitd_error, runtime_vmm_error, standard_guest_setup, start_implicit_container,
+    start_implicit_container_pty, start_implicit_container_with_staging,
 };
 #[allow(unused_imports)]
 use crate::runtime_rpc_error;
@@ -101,7 +101,7 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::LazyLock;
 #[allow(unused_imports)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 struct ExistingVmStdioPlan {
     stdio: ProcessStdio,
@@ -1888,6 +1888,7 @@ async fn restore_implicit_container_from_snapshot(
             socket_proxy_ids: Vec::new(),
             exit_status: None,
         })),
+        startup_timing: ContainerStartupTiming::default(),
         state: PhantomData,
     };
     Ok(TimedContainerRestore::new(
@@ -1946,6 +1947,7 @@ async fn restore_implicit_container_from_snapshot_state(
             socket_proxy_ids: Vec::new(),
             exit_status: None,
         })),
+        startup_timing: ContainerStartupTiming::default(),
         state: PhantomData,
     };
     Ok(TimedContainerRestore::new(
@@ -2125,6 +2127,7 @@ async fn start_on_vm_container<Vm: VmContext>(
             socket_proxy_ids: socket_relays.proxy_ids,
             exit_status: None,
         })),
+        startup_timing: ContainerStartupTiming::default(),
         state: PhantomData,
     })
 }
@@ -2132,14 +2135,34 @@ async fn start_on_vm_container<Vm: VmContext>(
 const TRANSIENT_VMEXEC_START_ATTEMPTS: usize = 3;
 const TRANSIENT_VMEXEC_START_RETRY_DELAY: Duration = Duration::from_millis(10);
 
+struct ProcessStartAttemptTiming {
+    pid: i32,
+    start_gate_wait: Duration,
+    start_process_rpc: Duration,
+}
+
 async fn start_process_with_transient_vmexec_retry(
     client: &mut VminitdClient,
     process_id: &ProcessId,
     container_id: &ContainerId,
     start_gate: Option<Arc<Semaphore>>,
 ) -> Result<i32> {
+    start_process_with_transient_vmexec_retry_timed(client, process_id, container_id, start_gate)
+        .await
+        .map(|timing| timing.pid)
+}
+
+async fn start_process_with_transient_vmexec_retry_timed(
+    client: &mut VminitdClient,
+    process_id: &ProcessId,
+    container_id: &ContainerId,
+    start_gate: Option<Arc<Semaphore>>,
+) -> Result<ProcessStartAttemptTiming> {
     let mut attempt = 1;
+    let mut start_gate_wait = Duration::ZERO;
+    let mut start_process_rpc = Duration::ZERO;
     loop {
+        let gate_started = Instant::now();
         let start_permit = match start_gate.clone() {
             Some(gate) => {
                 Some(
@@ -2153,6 +2176,8 @@ async fn start_process_with_transient_vmexec_retry(
             }
             None => None,
         };
+        start_gate_wait += gate_started.elapsed();
+        let start_started = Instant::now();
         let result = client
             .start_process(tonic::Request::new(ProcessCreate::start_request(
                 process_id,
@@ -2160,8 +2185,15 @@ async fn start_process_with_transient_vmexec_retry(
             )))
             .await
             .map_err(runtime_rpc_error("start process"));
+        start_process_rpc += start_started.elapsed();
         match result {
-            Ok(response) => return Ok(response.into_inner().pid),
+            Ok(response) => {
+                return Ok(ProcessStartAttemptTiming {
+                    pid: response.into_inner().pid,
+                    start_gate_wait,
+                    start_process_rpc,
+                });
+            }
             Err(error)
                 if attempt < TRANSIENT_VMEXEC_START_ATTEMPTS
                     && is_transient_vmexec_start_error(&error) =>
@@ -2215,18 +2247,23 @@ fn prepare_existing_vm_stdio(
         stderr: stderr_plan,
     })
 }
-async fn start_prepared_guest_path_container<Vm: VmContext>(
-    builder: ContainerBuilder<Vm, Ready>,
-    start_gate: Option<Arc<Semaphore>>,
-) -> Result<Container<Streams>> {
-    let vm = builder
+
+fn prepared_guest_path_vm<Vm: VmContext>(
+    builder: &ContainerBuilder<Vm, Ready>,
+) -> Result<VirtualMachine<Running>> {
+    builder
         .vm
         .as_deref()
         .cloned()
         .ok_or_else(|| Error::RuntimeOperation {
             operation: "spawn prepared guest-path container",
             reason: "builder does not carry a running VM handle".to_owned(),
-        })?;
+        })
+}
+
+fn ensure_prepared_guest_path_rootfs<Vm: VmContext>(
+    builder: &ContainerBuilder<Vm, Ready>,
+) -> Result<()> {
     let RootfsChoice::OnVm(VmRootfs::GuestPath(_)) =
         builder.rootfs.as_ref().expect("ready builder has rootfs")
     else {
@@ -2235,20 +2272,39 @@ async fn start_prepared_guest_path_container<Vm: VmContext>(
             reason: "builder rootfs is not a prepared guest path".to_owned(),
         });
     };
-    let staging = tempfile::tempdir().map_err(|error| Error::RuntimeArtifact {
+    Ok(())
+}
+
+fn prepared_guest_path_runtime_staging() -> Result<tempfile::TempDir> {
+    tempfile::tempdir().map_err(|error| Error::RuntimeArtifact {
         operation: "create prepared guest-path runtime staging directory",
         reason: error.to_string(),
-    })?;
+    })
+}
+
+async fn start_prepared_guest_path_container<Vm: VmContext>(
+    builder: ContainerBuilder<Vm, Ready>,
+    start_gate: Option<Arc<Semaphore>>,
+) -> Result<Container<Streams>> {
+    let total_started = Instant::now();
+    let vm = prepared_guest_path_vm(&builder)?;
+    ensure_prepared_guest_path_rootfs(&builder)?;
+    let staging = prepared_guest_path_runtime_staging()?;
+    let spec_started = Instant::now();
     let spec = runtime_spec_for_builder(&builder, false, vm.config().rosetta_enabled())?;
+    let spec_build = spec_started.elapsed();
     let process_id =
         ProcessId::new(builder.id.to_string()).map_err(|error| Error::RuntimeOperation {
             operation: "build process id",
             reason: error.to_string(),
         })?;
+    let vminitd_started = Instant::now();
     let mut client = connect_vminitd(&vm).await?;
+    let vminitd_connect = vminitd_started.elapsed();
     let bundle = ContainerBundle::for_id(&builder.id);
     let rootfs_path = runtime_spec_root_path(&builder, &bundle);
     let mut next_socket_port = EXEC_STDIO_PORT_START;
+    let socket_relays_started = Instant::now();
     let socket_relays = prepare_socket_relays(
         &vm,
         &mut client,
@@ -2258,7 +2314,11 @@ async fn start_prepared_guest_path_container<Vm: VmContext>(
         &mut next_socket_port,
     )
     .await?;
+    let socket_relays_prepare = socket_relays_started.elapsed();
+    let stdio_started = Instant::now();
     let stdio_plan = prepare_existing_vm_stdio(&vm, builder.stdin, builder.stdout, builder.stderr)?;
+    let stdio_prepare = stdio_started.elapsed();
+    let config_write_started = Instant::now();
     client
         .write_file(tonic::Request::new(
             bundle
@@ -2267,24 +2327,41 @@ async fn start_prepared_guest_path_container<Vm: VmContext>(
         ))
         .await
         .map_err(runtime_rpc_error("write config.json"))?;
+    let config_write_rpc = config_write_started.elapsed();
+    let request_encode_started = Instant::now();
     let create = ProcessCreate::new(process_id.clone(), builder.id.clone(), spec)
         .stdio(stdio_plan.stdio)
         .into_request()
         .map_err(runtime_vminitd_error("encode create process request"))?;
+    let request_encode = request_encode_started.elapsed();
+    let create_started = Instant::now();
     client
         .create_process(tonic::Request::new(create))
         .await
         .map_err(runtime_rpc_error("create process"))?;
-    let pid = start_process_with_transient_vmexec_retry(
+    let create_process_rpc = create_started.elapsed();
+    let start_timing = start_process_with_transient_vmexec_retry_timed(
         &mut client,
         &process_id,
         &builder.id,
         start_gate,
     )
     .await?;
+    let startup_timing = ContainerStartupTiming::new(
+        spec_build,
+        vminitd_connect,
+        socket_relays_prepare,
+        stdio_prepare,
+        config_write_rpc,
+        request_encode,
+        create_process_rpc,
+        start_timing.start_gate_wait,
+        start_timing.start_process_rpc,
+        total_started.elapsed(),
+    );
     Ok(Container {
         id: builder.id.clone(),
-        pid: Some(pid),
+        pid: Some(start_timing.pid),
         pty: None,
         runtime: Arc::new(Mutex::new(ContainerRuntime {
             vm,
@@ -2304,6 +2381,7 @@ async fn start_prepared_guest_path_container<Vm: VmContext>(
             socket_proxy_ids: socket_relays.proxy_ids,
             exit_status: None,
         })),
+        startup_timing,
         state: PhantomData,
     })
 }
@@ -2403,6 +2481,7 @@ async fn start_on_vm_container_pty<Vm: VmContext>(
             socket_proxy_ids: socket_relays.proxy_ids,
             exit_status: None,
         })),
+        startup_timing: ContainerStartupTiming::default(),
         state: PhantomData,
     })
 }

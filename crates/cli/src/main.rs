@@ -558,16 +558,6 @@ enum BenchmarkReportKind {
     Decision,
 }
 
-impl BenchmarkReportKind {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Lifecycle => "lifecycle",
-            Self::Overhead => "overhead",
-            Self::Decision => "decision",
-        }
-    }
-}
-
 #[derive(Debug, Parser)]
 struct ValidateSoakArgs {
     /// Soak evidence JSON artifact to validate.
@@ -2822,7 +2812,7 @@ fn write_agent_computer_trace_report(
             }
             _ => firkin::trace::SandboxEventName::AgentComputerRequestStart,
         };
-        let metric = agent_computer_metric_for_lifecycle(first.lifecycle());
+        let metric = agent_computer_trace_line_metric(first.lifecycle(), first.workload());
         writeln!(
             writer,
             "trace={} metric={} lifecycle={:?} workload={:?} profile={:?} events={} overflowed={} total_ms={} create_ms={} probe_ms={} cli_ms={} browser_ms={} database_ms={}",
@@ -2860,10 +2850,19 @@ fn write_agent_computer_trace_report(
     Ok(())
 }
 
-fn agent_computer_metric_for_lifecycle(lifecycle: firkin::trace::LifecycleClass) -> &'static str {
-    match lifecycle {
-        firkin::trace::LifecycleClass::Resumed => "product.agent_computer_resume_ms",
-        _ => "product.agent_computer_ready_ms",
+fn agent_computer_trace_line_metric(
+    lifecycle: firkin::trace::LifecycleClass,
+    workload: firkin::trace::WorkloadClass,
+) -> &'static str {
+    match (lifecycle, workload) {
+        (firkin::trace::LifecycleClass::Resumed, firkin::trace::WorkloadClass::AgentComputer) => {
+            "product.agent_computer_resume_ms"
+        }
+        (_, firkin::trace::WorkloadClass::AgentComputer) => "product.agent_computer_ready_ms",
+        (_, firkin::trace::WorkloadClass::ConcurrentCreate) => {
+            "debug.product.agent_computer_density_trace_ms"
+        }
+        _ => "debug.product.agent_computer_trace_ms",
     }
 }
 
@@ -3037,13 +3036,28 @@ fn write_benchmark_report(
 ) -> Result<(), Box<dyn Error>> {
     match args.kind {
         BenchmarkReportKind::Lifecycle => {
-            let report = firkin::evidence::BenchmarkEvidenceArtifact::read_json(&args.artifact)?;
-            write_benchmark_summaries(args, report.summaries(), writer)?;
+            if let Ok(report) =
+                firkin::evidence::BenchmarkEvidenceArtifact::read_json(&args.artifact)
+            {
+                write_benchmark_summaries(args, "lifecycle", report.summaries(), writer)?;
+            } else {
+                let artifact = load_raw_sample_artifact_summaries(&args.artifact)?;
+                if artifact.summaries.iter().any(|summary| {
+                    summary.kind() != firkin::trace::BenchmarkMetricKind::LifecycleLatency
+                }) {
+                    return Err(format!(
+                        "lifecycle report expected lifecycle-latency samples in {}",
+                        args.artifact.display()
+                    )
+                    .into());
+                }
+                write_benchmark_summaries(args, artifact.kind, &artifact.summaries, writer)?;
+            }
         }
         BenchmarkReportKind::Overhead => {
             let report =
                 firkin::evidence::BenchmarkOverheadEvidenceArtifact::read_json(&args.artifact)?;
-            write_benchmark_summaries(args, report.summaries(), writer)?;
+            write_benchmark_summaries(args, "overhead", report.summaries(), writer)?;
         }
         BenchmarkReportKind::Decision => {
             let artifact = load_benchmark_summaries(&args.artifact)?;
@@ -3055,13 +3069,14 @@ fn write_benchmark_report(
 
 fn write_benchmark_summaries(
     args: &BenchmarkReportArgs,
+    kind: &str,
     summaries: &[firkin::evidence::BenchmarkSummary],
     mut writer: impl Write,
 ) -> std::io::Result<()> {
     writeln!(
         writer,
         "benchmark_report=summary kind={} artifact={} metrics={}",
-        args.kind.as_str(),
+        kind,
         args.artifact.display(),
         summaries.len()
     )?;
@@ -3441,7 +3456,61 @@ fn load_benchmark_summaries(path: &Path) -> Result<LoadedBenchmarkSummaries, Box
             summaries: report.summaries().to_vec(),
         });
     }
+    if let Ok(artifact) = load_raw_sample_artifact_summaries(path) {
+        return Ok(artifact);
+    }
     Err(format!("unsupported benchmark artifact {}", path.display()).into())
+}
+
+#[derive(serde::Deserialize)]
+struct RawBenchmarkSampleArtifact {
+    #[serde(default)]
+    kind: String,
+    samples: Vec<firkin::trace::BenchmarkSample>,
+}
+
+fn load_raw_sample_artifact_summaries(
+    path: &Path,
+) -> Result<LoadedBenchmarkSummaries, Box<dyn Error>> {
+    let bytes = std::fs::read(path)?;
+    let artifact = serde_json::from_slice::<RawBenchmarkSampleArtifact>(&bytes)?;
+    if artifact.samples.is_empty() {
+        return Err(format!(
+            "benchmark sample artifact has no samples: {}",
+            path.display()
+        )
+        .into());
+    }
+    let mut grouped = BTreeMap::<String, Vec<firkin::trace::BenchmarkSample>>::new();
+    for sample in artifact.samples {
+        grouped
+            .entry(sample.metric().to_owned())
+            .or_default()
+            .push(sample);
+    }
+    let mut summaries = Vec::with_capacity(grouped.len());
+    for (metric, samples) in grouped {
+        summaries.push(firkin::evidence::BenchmarkSummary::from_samples(
+            metric.clone(),
+            samples,
+        )?);
+    }
+    Ok(LoadedBenchmarkSummaries {
+        kind: raw_sample_artifact_kind(&artifact.kind),
+        summaries,
+    })
+}
+
+fn raw_sample_artifact_kind(kind: &str) -> &'static str {
+    match kind {
+        "live_direct_exec_first_stdout" => "live_direct_exec_first_stdout",
+        "live_resume_to_first_stdout" => "live_resume_to_first_stdout",
+        "live_retained_shell_batch_100" => "live_retained_shell_batch_100",
+        "live_retained_shell_density" => "live_retained_shell_density",
+        "live_warm_to_first_stdout" => "live_warm_to_first_stdout",
+        "live_product_pod_disk_reclaim" => "live_product_pod_disk_reclaim",
+        _ => "live_sample_artifact",
+    }
 }
 
 #[derive(Clone)]
@@ -3499,9 +3568,10 @@ const fn percentile_availability_rank(
         firkin::evidence::PercentileAvailability::SmokeOnly => 0,
         firkin::evidence::PercentileAvailability::SuperfastIteration => 1,
         firkin::evidence::PercentileAvailability::FastIteration => 2,
-        firkin::evidence::PercentileAvailability::P50P90DecisionGrade => 3,
-        firkin::evidence::PercentileAvailability::P95DecisionGrade => 4,
-        firkin::evidence::PercentileAvailability::P99DecisionGrade => 5,
+        firkin::evidence::PercentileAvailability::BaselineCheckpoint => 3,
+        firkin::evidence::PercentileAvailability::P50P90DecisionGrade => 4,
+        firkin::evidence::PercentileAvailability::P95DecisionGrade => 5,
+        firkin::evidence::PercentileAvailability::P99DecisionGrade => 6,
     }
 }
 
@@ -4966,15 +5036,6 @@ fn preflight_e2b_proxy_domain(
     proxy_addr: SocketAddr,
 ) -> Result<(), Box<dyn Error>> {
     let probe_host = format!("49983-sbx_probe.{domain}");
-    if domain.as_str().ends_with(".localhost") {
-        if proxy_addr.ip().is_loopback() {
-            return Ok(());
-        }
-        return Err(format!(
-            "E2B proxy domain `{domain}` uses loopback .localhost names, but {proxy_addr} is not proxy listener; pass a loopback proxy address or configure local DNS"
-        )
-        .into());
-    }
     let resolved = (probe_host.as_str(), proxy_addr.port())
         .to_socket_addrs()
         .map_err(|error| {
@@ -5870,9 +5931,11 @@ mod tests {
         let output = String::from_utf8(output).expect("utf8");
 
         assert!(output.contains("manifest=firkin-benchmark-measurement-coverage-v1"));
-        assert!(output.contains("p0_metrics=14"));
+        assert!(output.contains("p0_metrics=13"));
         assert!(output.contains("metric=start.hot_to_first_stdout_ms status=signed_live_exact"));
-        assert!(output.contains("metric=exec.first_stdout_byte_ms status=signed_live_exact"));
+        assert!(
+            output.contains("metric=exec.direct_first_stdout_byte_ms status=signed_live_exact")
+        );
         assert!(output.contains("metric=disk.sparse_bloat_after_trim status=signed_live_exact"));
     }
 
@@ -5938,7 +6001,9 @@ mod tests {
         assert!(output.contains(
             "artifact_metric=start.agent_task_ready_ms artifact_status=present artifact_count=2 artifact_kind=scorecard"
         ));
-        assert!(output.contains("metric=exec.first_stdout_byte_ms status=signed_live_exact"));
+        assert!(
+            output.contains("metric=exec.direct_first_stdout_byte_ms status=signed_live_exact")
+        );
     }
 
     #[test]
@@ -6258,7 +6323,7 @@ mod tests {
 
         assert!(output.contains("manifest=firkin-benchmark-targets-v1"));
         assert!(output.contains("target=start.hot_to_first_stdout_ms p50_ms=50 p95_ms=75"));
-        assert!(output.contains("target=exec.first_stdout_byte_ms p50_ms=20 p95_ms=35"));
+        assert!(output.contains("target=exec.direct_first_stdout_byte_ms p50_ms=20 p95_ms=35"));
         assert!(output.contains("target=start.resume_to_first_stdout_ms p50_ms=35 p95_ms=50"));
         assert!(output.contains("target=exec.batch_100_small_commands_ms"));
         for metric in firkin::evidence::REQUIRED_LIFECYCLE_LATENCY_METRICS {
@@ -7610,6 +7675,80 @@ mod tests {
     }
 
     #[test]
+    fn reports_decision_confidence_for_baseline_checkpoint_samples() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let artifact = tempdir.path().join("decision-checkpoint.json");
+        write_lifecycle_artifact_with_values(
+            &artifact,
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        );
+        let args = BenchmarkReportArgs {
+            kind: BenchmarkReportKind::Decision,
+            artifact,
+        };
+        let mut output = Vec::new();
+
+        write_benchmark_report(&args, &mut output).expect("decision report");
+        let output = String::from_utf8(output).expect("utf8");
+
+        assert!(output.contains("metric=start.hot_to_first_stdout_ms"));
+        assert!(output.contains("count=10"));
+        assert!(output.contains("confidence=baseline_checkpoint"));
+        assert!(output.contains("unstable_percentile=true"));
+        assert!(output.contains("p95_status=unstable"));
+    }
+
+    #[test]
+    fn reports_decision_from_raw_live_sample_artifact() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let artifact = tempdir.path().join("retained-batch.json");
+        write_raw_live_sample_artifact(
+            &artifact,
+            "live_retained_shell_batch_100",
+            "exec.batch_100_small_commands_ms",
+            [28.0, 113.0, 148.0],
+        );
+        let args = BenchmarkReportArgs {
+            kind: BenchmarkReportKind::Decision,
+            artifact,
+        };
+        let mut output = Vec::new();
+
+        write_benchmark_report(&args, &mut output).expect("decision report");
+        let output = String::from_utf8(output).expect("utf8");
+
+        assert!(output.contains("benchmark_report=decision artifact="));
+        assert!(output.contains("artifact_kind=live_retained_shell_batch_100"));
+        assert!(output.contains("metric=exec.batch_100_small_commands_ms"));
+        assert!(output.contains("count=3"));
+        assert!(output.contains("confidence=superfast_iteration"));
+    }
+
+    #[test]
+    fn reports_lifecycle_from_raw_live_sample_artifact() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let artifact = tempdir.path().join("retained-batch.json");
+        write_raw_live_sample_artifact(
+            &artifact,
+            "live_retained_shell_batch_100",
+            "exec.batch_100_small_commands_ms",
+            [28.0, 113.0, 148.0],
+        );
+        let args = BenchmarkReportArgs {
+            kind: BenchmarkReportKind::Lifecycle,
+            artifact,
+        };
+        let mut output = Vec::new();
+
+        write_benchmark_report(&args, &mut output).expect("lifecycle report");
+        let output = String::from_utf8(output).expect("utf8");
+
+        assert!(output.contains("benchmark_report=summary kind=live_retained_shell_batch_100"));
+        assert!(output.contains("metric=exec.batch_100_small_commands_ms"));
+        assert!(output.contains("count=3 p50=113 p90=148 p95=148 p99=148 max=148"));
+    }
+
+    #[test]
     fn saves_lists_and_compares_benchmark_baselines() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let baseline_artifact = tempdir.path().join("baseline.json");
@@ -7708,6 +7847,34 @@ mod tests {
         let report =
             firkin::evidence::BenchmarkEvidenceReport::from_samples(samples).expect("report");
         firkin::evidence::BenchmarkEvidenceArtifact::write_json(path, &report).expect("artifact");
+    }
+
+    fn write_raw_live_sample_artifact(
+        path: &Path,
+        kind: &str,
+        metric: &str,
+        values: impl IntoIterator<Item = f64>,
+    ) {
+        let samples = values
+            .into_iter()
+            .map(|value| {
+                firkin::trace::BenchmarkSample::new(
+                    metric,
+                    firkin::trace::BenchmarkMetricKind::LifecycleLatency,
+                    firkin::trace::BenchmarkUnit::Milliseconds,
+                    value,
+                )
+            })
+            .collect::<Vec<_>>();
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "kind": kind,
+                "samples": samples,
+            }))
+            .expect("json"),
+        )
+        .expect("artifact");
     }
 
     fn make_required_metrics_match_summaries(path: &Path) {
@@ -7968,7 +8135,7 @@ mod tests {
         values: impl IntoIterator<Item = f64>,
     ) -> Vec<firkin::trace::BenchmarkSample> {
         let values = values.into_iter().collect::<Vec<_>>();
-        firkin::evidence::required_agent_computer_metric_definitions()
+        let mut samples = firkin::evidence::required_agent_computer_metric_definitions()
             .into_iter()
             .flat_map(|metric| {
                 values.iter().copied().map(move |value| {
@@ -7985,11 +8152,64 @@ mod tests {
                                 .with_static_tag("browser_boundary", "real_browser_sidecar")
                                 .with_static_tag("database_boundary", "real_db_sidecar")
                         }
+                        "density.max_agent_computers_before_ready_p95_doubles" => sample
+                            .with_static_tag("measurement_boundary", "product_path")
+                            .with_static_tag("pod_surface", "product_pod_ready_deck")
+                            .with_static_tag("excludes_container_add", "false")
+                            .with_static_tag(
+                                "ready_signal",
+                                "agent_computer_ready_after_container_add",
+                            )
+                            .with_static_tag("cli_boundary", "real_cli")
+                            .with_static_tag("browser_boundary", "real_browser_sidecar")
+                            .with_static_tag("database_boundary", "real_db_sidecar"),
                         _ => sample,
                     }
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        samples.extend(product_density_capacity_tier_samples());
+        samples
+    }
+
+    fn product_density_capacity_tier_samples() -> Vec<firkin::trace::BenchmarkSample> {
+        [
+            (
+                "debug.product.agent_computer_ready_deck_c4_ms",
+                110.0,
+                "snappy_4",
+            ),
+            (
+                "debug.product.agent_computer_ready_deck_c8_ms",
+                225.0,
+                "snappy_8",
+            ),
+            (
+                "debug.product.agent_computer_ready_deck_c16_ms",
+                450.0,
+                "degraded_16",
+            ),
+        ]
+        .into_iter()
+        .map(|(metric, value, tier)| {
+            firkin::trace::BenchmarkSample::new(
+                metric,
+                firkin::trace::BenchmarkMetricKind::LifecycleLatency,
+                firkin::trace::BenchmarkUnit::Milliseconds,
+                value,
+            )
+            .with_static_tag("probe_surface", "browser_db_cli_readiness")
+            .with_static_tag("measurement_boundary", "product_path_density_level")
+            .with_static_tag("cli_boundary", "real_cli")
+            .with_static_tag("browser_boundary", "real_browser_sidecar")
+            .with_static_tag("database_boundary", "real_db_sidecar")
+            .with_static_tag("pod_surface", "product_pod_ready_deck")
+            .with_static_tag("excludes_container_add", "false")
+            .with_static_tag("ready_signal", "agent_computer_ready_after_container_add")
+            .with_static_tag("density_tier", tier)
+            .with_static_tag("capacity_status", "pass")
+        })
+        .collect()
     }
 
     fn proxy_database_ready_samples(
@@ -8014,54 +8234,68 @@ mod tests {
         start_event: firkin::trace::SandboxEventName,
         ready_ns: u128,
     ) -> firkin::trace::SandboxEventTrace {
+        agent_computer_trace_with_workload(
+            lifecycle,
+            firkin::trace::WorkloadClass::AgentComputer,
+            start_event,
+            ready_ns,
+        )
+    }
+
+    fn agent_computer_trace_with_workload(
+        lifecycle: firkin::trace::LifecycleClass,
+        workload: firkin::trace::WorkloadClass,
+        start_event: firkin::trace::SandboxEventName,
+        ready_ns: u128,
+    ) -> firkin::trace::SandboxEventTrace {
         let mut trace = firkin::trace::SandboxEventTrace::new();
         trace.push(firkin::trace::SandboxTraceEvent::new(
             start_event,
             0,
             lifecycle,
-            firkin::trace::WorkloadClass::AgentComputer,
+            workload,
             firkin::trace::RuntimeProfile::BrowserDbCli,
         ));
         trace.push(firkin::trace::SandboxTraceEvent::new(
             firkin::trace::SandboxEventName::AgentComputerSandboxCreated,
             50_000_000,
             lifecycle,
-            firkin::trace::WorkloadClass::AgentComputer,
+            workload,
             firkin::trace::RuntimeProfile::BrowserDbCli,
         ));
         trace.push(firkin::trace::SandboxTraceEvent::new(
             firkin::trace::SandboxEventName::AgentComputerProbeStart,
             75_000_000,
             lifecycle,
-            firkin::trace::WorkloadClass::AgentComputer,
+            workload,
             firkin::trace::RuntimeProfile::BrowserDbCli,
         ));
         trace.push(firkin::trace::SandboxTraceEvent::new(
             firkin::trace::SandboxEventName::BrowserReady,
             90_000_000,
             lifecycle,
-            firkin::trace::WorkloadClass::AgentComputer,
+            workload,
             firkin::trace::RuntimeProfile::BrowserDbCli,
         ));
         trace.push(firkin::trace::SandboxTraceEvent::new(
             firkin::trace::SandboxEventName::CliFirstUsefulStdout,
             100_000_000,
             lifecycle,
-            firkin::trace::WorkloadClass::AgentComputer,
+            workload,
             firkin::trace::RuntimeProfile::BrowserDbCli,
         ));
         trace.push(firkin::trace::SandboxTraceEvent::new(
             firkin::trace::SandboxEventName::DatabaseReady,
             ready_ns,
             lifecycle,
-            firkin::trace::WorkloadClass::AgentComputer,
+            workload,
             firkin::trace::RuntimeProfile::BrowserDbCli,
         ));
         trace.push(firkin::trace::SandboxTraceEvent::new(
             firkin::trace::SandboxEventName::AgentComputerReady,
             ready_ns,
             lifecycle,
-            firkin::trace::WorkloadClass::AgentComputer,
+            workload,
             firkin::trace::RuntimeProfile::BrowserDbCli,
         ));
         trace
@@ -8112,7 +8346,10 @@ mod tests {
         let report_output = String::from_utf8(report_output).expect("utf8");
 
         assert!(report_output.contains("scorecard_report=summary"));
-        assert!(report_output.contains("metrics=14"));
+        assert!(report_output.contains(&format!(
+            "metrics={}",
+            firkin::evidence::P0_SCORECARD_METRICS.len()
+        )));
         assert!(report_output.contains("metric=start.agent_task_ready_ms"));
         assert!(report_output.contains("count=100 p50=50 p90=90 p95=95 p99=99 max=100"));
     }
@@ -8128,6 +8365,13 @@ mod tests {
                 .expect("sample json"),
         )
         .expect("write samples");
+        let expected_promotion_blockers =
+            firkin::evidence::AutoscaleEfficiencyScorecardReport::from_samples(
+                autoscale_scorecard_samples((1..=100_u32).map(f64::from)),
+            )
+            .expect("expected autoscale report")
+            .promotion_blockers()
+            .len();
 
         let write_args = WriteAutoscaleScorecardArgs {
             samples: samples_path,
@@ -8158,7 +8402,9 @@ mod tests {
 
         assert!(validate_output.contains("autoscale_scorecard=valid"));
         assert!(validate_output.contains("min_samples=3"));
-        assert!(validate_output.contains("promotion_blockers=11"));
+        assert!(
+            validate_output.contains(&format!("promotion_blockers={expected_promotion_blockers}"))
+        );
         assert!(validate_output.contains("metric=autoscale.ready_queue_hit_rate_pct"));
         assert!(validate_output.contains("signed-live autoscale harness"));
 
@@ -8191,7 +8437,9 @@ mod tests {
             .expect_err("autoscale promotion blockers fail promotable validation");
         let validate_output = String::from_utf8(validate_output).expect("utf8");
 
-        assert!(validate_output.contains("promotion_blockers=11"));
+        assert!(
+            validate_output.contains(&format!("promotion_blockers={expected_promotion_blockers}"))
+        );
         assert!(error.to_string().contains("not promotion-grade"));
     }
 
@@ -8351,6 +8599,12 @@ mod tests {
                 firkin::trace::SandboxEventName::AgentComputerResumed,
                 150_000_000,
             ),
+            agent_computer_trace_with_workload(
+                firkin::trace::LifecycleClass::Resumed,
+                firkin::trace::WorkloadClass::ConcurrentCreate,
+                firkin::trace::SandboxEventName::AgentComputerResumed,
+                175_000_000,
+            ),
         ];
         std::fs::write(
             &artifact,
@@ -8366,7 +8620,7 @@ mod tests {
 
         assert!(output.contains("agent_computer_trace_report=summary"));
         assert!(output.contains("kind=raw_trace_array"));
-        assert!(output.contains("traces=2 overflowed=0"));
+        assert!(output.contains("traces=3 overflowed=0"));
         assert!(output.contains("metric=product.agent_computer_ready_ms"));
         assert!(output.contains("metric=product.agent_computer_resume_ms"));
         assert!(output.contains("confidence=smoke_only"));
@@ -8383,6 +8637,9 @@ mod tests {
         );
         assert!(output.contains("total_ms=150"));
         assert!(output.contains("probe_ms=75"));
+        assert!(output.contains(
+            "trace=2 metric=debug.product.agent_computer_density_trace_ms lifecycle=Resumed workload=ConcurrentCreate"
+        ));
     }
 
     #[test]

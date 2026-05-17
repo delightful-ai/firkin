@@ -1,14 +1,10 @@
 [package]
 name = "firkin-e2b-contract"
-description = "E2B-compatible API contract types for Firkin"
-version = "0.0.1-alpha"
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
 
 [lib]
 name = "firkin_e2b_contract"
@@ -17,10 +13,10 @@ path = "src/lib.rs"
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
-firkin-types = { path = "../types", version = "0.0.1-alpha", features = ["serde"] }
+firkin-types = { path = "../types", version = "0.1.0", features = ["serde"] }
 serde.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["formatting"] }
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "sync", "time"] }
-firkin-e2b-wire = { path = "../e2b-wire", version = "0.0.1-alpha" }
+firkin-e2b-wire = { path = "../e2b-wire", version = "0.1.0" }

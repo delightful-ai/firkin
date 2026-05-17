@@ -34,7 +34,7 @@ release credentials are confirmed.
 4. Confirm crate ownership on crates.io.
 5. For later releases, configure the GitHub environment `crates-io` with a
    `CRATES_IO_TOKEN` secret, then run the `Publish crates` workflow manually.
-6. Create a `v0.0.1-alpha.N` tag only after dry-runs pass.
+6. Create a `v0.1.0.N` tag only after dry-runs pass.
 7. Let the release workflow create a draft release. Publish the draft manually.
 
 Do not run `cargo publish`, make the GitHub repo public, or publish a release

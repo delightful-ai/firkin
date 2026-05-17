@@ -1,9 +1,5 @@
 //! Product pod route smoke coverage for runtime adapters.
 
-#![cfg(any())]
-// Scaffolding: this runtime integration test depends on firkin-single-node.
-// It is disabled during the crates.io bootstrap to keep the publish graph acyclic.
-
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 

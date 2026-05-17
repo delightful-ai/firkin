@@ -1,14 +1,11 @@
 [package]
 name = "firkin-single-node"
 description = "Production Apple/VZ runtime composition for the firkin Rust containerization library"
-version = "0.0.1-alpha"
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
 
 [lib]
 name = "firkin_single_node"
@@ -22,23 +19,23 @@ snapshot = ["firkin-core/snapshot"]
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
-firkin-admission = { path = "../admission", version = "0.0.1-alpha" }
-firkin-artifacts = { path = "../artifacts", version = "0.0.1-alpha" }
-firkin-core = { path = "../core", version = "0.0.1-alpha" }
-firkin-e2b-contract = { path = "../e2b-contract", version = "0.0.1-alpha" }
-firkin-e2b-server = { path = "../e2b-server", version = "0.0.1-alpha" }
-firkin-e2b-wire = { path = "../e2b-wire", version = "0.0.1-alpha" }
-firkin-envd = { path = "../envd", version = "0.0.1-alpha" }
-firkin-ext4 = { path = "../ext4", version = "0.0.1-alpha" }
-firkin-hygiene = { path = "../hygiene", version = "0.0.1-alpha" }
-firkin-oci = { path = "../oci", version = "0.0.1-alpha" }
-firkin-runtime = { path = "../runtime", version = "0.0.1-alpha" }
-firkin-sandbox = { path = "../sandbox", version = "0.0.1-alpha" }
-firkin-template = { path = "../template", version = "0.0.1-alpha" }
-firkin-trace = { path = "../trace", version = "0.0.1-alpha" }
-firkin-types = { path = "../types", version = "0.0.1-alpha" }
-firkin-vminitd-bytes = { path = "../vminitd-bytes", version = "0.0.1-alpha" }
-firkin-vmm = { path = "../vmm", version = "0.0.1-alpha.1" }
+firkin-admission = { path = "../admission", version = "0.1.0" }
+firkin-artifacts = { path = "../artifacts", version = "0.1.0" }
+firkin-core = { path = "../core", version = "0.1.0" }
+firkin-e2b-contract = { path = "../e2b-contract", version = "0.1.0" }
+firkin-e2b-server = { path = "../e2b-server", version = "0.1.0" }
+firkin-e2b-wire = { path = "../e2b-wire", version = "0.1.0" }
+firkin-envd = { path = "../envd", version = "0.1.0" }
+firkin-ext4 = { path = "../ext4", version = "0.1.0" }
+firkin-hygiene = { path = "../hygiene", version = "0.1.0" }
+firkin-oci = { path = "../oci", version = "0.1.0" }
+firkin-runtime = { path = "../runtime", version = "0.1.0" }
+firkin-sandbox = { path = "../sandbox", version = "0.1.0" }
+firkin-template = { path = "../template", version = "0.1.0" }
+firkin-trace = { path = "../trace", version = "0.1.0" }
+firkin-types = { path = "../types", version = "0.1.0" }
+firkin-vminitd-bytes = { path = "../vminitd-bytes", version = "0.1.0" }
+firkin-vmm = { path = "../vmm", version = "0.1.0" }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -49,3 +46,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

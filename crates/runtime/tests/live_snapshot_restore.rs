@@ -1,19 +1,16 @@
 //! Ignored live VZ snapshot restore tests for the runtime crate.
-//!
-//! These tests currently depend on a local, unpublished E2B Rust SDK checkout.
-//! They stay in the tree as compatibility evidence, but are disabled in the
-//! standalone release candidate until they can target a published SDK crate or a
-//! small in-repo compatibility harness.
 
 #![cfg(any())]
-// Scaffolding: this signed Apple/VZ integration suite also depends on
-// firkin-single-node. Keep it out of the default test graph until the live
-// harness moves under single-node or a dedicated unpublished test crate.
+// Scaffolding: this signed Apple/VZ integration suite mixes runtime, benchmark,
+// single-node, and E2B SDK compatibility coverage. Keep it out of the default
+// package graph until it moves under a dedicated live harness.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command as StdCommand};
+use std::pin::Pin;
+use std::process::{Child, Command as StdCommand, Stdio as ProcessStdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,7 +22,8 @@ use firkin_benchmark::{
     GuestDiskCoreBenchmarkOutput, GuestIoPressure, HOST_BYTES_RECLAIMED_AFTER_TRIM_METRIC,
     HostFootprintSnapshot, HostGuestDiskUsageOutput, HostMemoryAttributionCollector,
     HostMemoryAttributionScope, MAX_AGENT_COMPUTERS_BEFORE_READY_P95_DOUBLES_METRIC,
-    MAX_PRESTARTED_AGENT_SLOTS_BEFORE_CHECKOUT_READY_P95_DOUBLES_METRIC, ReadyQueueOutcomes,
+    MAX_PRESTARTED_AGENT_SLOTS_BEFORE_CHECKOUT_READY_P95_DOUBLES_METRIC,
+    MAX_RETAINED_SHELLS_BEFORE_FIRST_STDOUT_P95_DOUBLES_METRIC, ReadyQueueOutcomes,
     RuntimeAgentComputerScorecardEvidenceWriter, RuntimeAutoscaleScorecardEvidenceWriter,
     RuntimeBenchmarkEvidenceWriter, RuntimeOverheadEvidenceWriter, RuntimeProductSoakConfig,
     RuntimeProductSoakRunner, SPARSE_BLOAT_AFTER_DELETE_METRIC, SafeSpareResourceSnapshot,
@@ -59,7 +57,7 @@ use firkin_trace::{
     RuntimeProfile, SandboxEventName, SandboxEventTrace, WorkloadClass,
 };
 use firkin_vmm::Network;
-use futures_util::{StreamExt, future::join_all};
+use futures_util::{Stream, StreamExt, future::join_all};
 use prost::Message;
 use reqwest::header::CONTENT_TYPE;
 use tokio::net::TcpListener;
@@ -70,7 +68,7 @@ use {
         SnapshotArtifactKind, SnapshotArtifactManifest,
     },
     firkin_evidence::{
-        AGENT_COMPUTER_SCORECARD_METRICS, AUTOSCALE_EFFICIENCY_SCORECARD_METRICS,
+        AGENT_COMPUTER_SCORECARD_METRICS, AUTOSCALE_EFFICIENCY_SCORECARD_METRICS, BenchmarkSummary,
         PercentileAvailability, ProductAutoscaleDurationMetric, REQUIRED_FIRKIN_OVERHEAD_METRICS,
         REQUIRED_LIFECYCLE_LATENCY_METRICS, SoakEvidenceArtifact,
     },
@@ -374,6 +372,53 @@ mod envd_data_event_proto {
 }
 
 #[derive(Clone, PartialEq, Message)]
+struct EnvdSendInputRequestProto {
+    #[prost(message, optional, tag = "1")]
+    process: Option<EnvdProcessSelectorProto>,
+    #[prost(message, optional, tag = "2")]
+    input: Option<EnvdProcessInputProto>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct EnvdProcessSelectorProto {
+    #[prost(oneof = "envd_process_selector_proto_test::Selector", tags = "1, 2")]
+    selector: Option<envd_process_selector_proto_test::Selector>,
+}
+
+mod envd_process_selector_proto_test {
+    use prost::Oneof;
+
+    #[derive(Clone, PartialEq, Oneof)]
+    pub enum Selector {
+        #[prost(uint32, tag = "1")]
+        Pid(u32),
+        #[prost(string, tag = "2")]
+        Tag(String),
+    }
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct EnvdProcessInputProto {
+    #[prost(oneof = "envd_process_input_proto_test::Input", tags = "1, 2")]
+    input: Option<envd_process_input_proto_test::Input>,
+}
+
+mod envd_process_input_proto_test {
+    use prost::Oneof;
+
+    #[derive(Clone, PartialEq, Oneof)]
+    pub enum Input {
+        #[prost(bytes, tag = "1")]
+        Stdin(Vec<u8>),
+        #[prost(bytes, tag = "2")]
+        Pty(Vec<u8>),
+    }
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct EnvdSendInputResponseProto {}
+
+#[derive(Clone, PartialEq, Message)]
 struct EnvdEndEventProto {
     #[prost(sint32, tag = "1")]
     exit_code: i32,
@@ -549,6 +594,21 @@ fn encode_envd_start_request(cmd: &str, args: &[&str], tag: &str) -> Vec<u8> {
     }
     .encode(&mut request)
     .expect("encode start request");
+    request
+}
+
+fn encode_envd_send_input_request(pid: u32, data: Vec<u8>) -> Vec<u8> {
+    let mut request = Vec::new();
+    EnvdSendInputRequestProto {
+        process: Some(EnvdProcessSelectorProto {
+            selector: Some(envd_process_selector_proto_test::Selector::Pid(pid)),
+        }),
+        input: Some(EnvdProcessInputProto {
+            input: Some(envd_process_input_proto_test::Input::Stdin(data)),
+        }),
+    }
+    .encode(&mut request)
+    .expect("encode send input request");
     request
 }
 
@@ -944,24 +1004,63 @@ impl Drop for HostGitDaemon {
 }
 
 fn start_host_git_daemon(repo_root: &Path) -> HostGitDaemon {
+    start_host_git_daemon_with_candidate_ports(
+        repo_root,
+        (0..8).map(|_| reserve_ephemeral_host_port()),
+    )
+}
+
+fn reserve_ephemeral_host_port() -> u16 {
     let port_socket = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("free port");
     let port = port_socket.local_addr().expect("local addr").port();
     drop(port_socket);
+    port
+}
+
+fn start_host_git_daemon_with_candidate_ports(
+    repo_root: &Path,
+    candidate_ports: impl IntoIterator<Item = u16>,
+) -> HostGitDaemon {
     let base_path = format!("--base-path={}", repo_root.to_str().expect("repo root"));
-    let port_arg = format!("--port={port}");
-    let child = StdCommand::new("git")
-        .args([
-            "daemon",
-            "--reuseaddr",
-            "--export-all",
-            base_path.as_str(),
-            "--listen=0.0.0.0",
-            port_arg.as_str(),
-        ])
-        .spawn()
-        .expect("start git daemon");
-    std::thread::sleep(Duration::from_millis(500));
-    HostGitDaemon { child, port }
+    let mut last_status = None;
+    for port in candidate_ports {
+        let port_arg = format!("--port={port}");
+        let mut child = StdCommand::new("git")
+            .args([
+                "daemon",
+                "--reuseaddr",
+                "--export-all",
+                base_path.as_str(),
+                "--listen=0.0.0.0",
+                port_arg.as_str(),
+            ])
+            .stdout(ProcessStdio::null())
+            .stderr(ProcessStdio::null())
+            .spawn()
+            .expect("start git daemon");
+        std::thread::sleep(Duration::from_millis(500));
+        if let Some(status) = child.try_wait().expect("poll git daemon") {
+            last_status = Some(status);
+            continue;
+        }
+        return HostGitDaemon { child, port };
+    }
+    panic!("git daemon failed to start on candidate ports: {last_status:?}");
+}
+
+#[test]
+fn host_git_daemon_retries_when_candidate_port_is_busy() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _bare = create_host_git_repo(temp.path());
+    let busy_socket = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("busy port");
+    let busy_port = busy_socket.local_addr().expect("busy addr").port();
+    let free_socket = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("free port");
+    let retry_port = free_socket.local_addr().expect("free addr").port();
+    drop(free_socket);
+
+    let daemon = start_host_git_daemon_with_candidate_ports(temp.path(), [busy_port, retry_port]);
+
+    assert_eq!(daemon.port(), retry_port);
 }
 
 fn assert_child_exited_after_term(child: &mut Child) {
@@ -1643,7 +1742,7 @@ async fn live_product_route_soak_writes_evidence_artifact() {
     let builder_id = "live-product-route-soak-source";
     let (_temp, snapshot_path) = save_live_snapshot(rootfs.clone(), builder_id).await;
     let adapter = live_envd_adapter(rootfs, builder_id);
-    let backend = live_backend_with_template(adapter, &snapshot_path);
+    let backend = live_backend_with_template(adapter.clone(), &snapshot_path);
     let config = RuntimeProductSoakConfig::inspect_like(
         duration,
         SandboxCreateRequest {
@@ -2188,7 +2287,7 @@ async fn live_vendored_sdk_reaches_code_interpreter_probe_through_firkin_domain_
     let builder_id = "live-sdk-code-interpreter-probe";
     let (_temp, snapshot_path) = save_live_snapshot(rootfs.clone(), builder_id).await;
     let adapter = live_envd_adapter(rootfs, builder_id);
-    let backend = live_backend_with_template(adapter, &snapshot_path);
+    let backend = live_backend_with_template(adapter.clone(), &snapshot_path);
 
     let control_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let control_url = format!("http://{}", control_listener.local_addr().unwrap());
@@ -2635,10 +2734,26 @@ async fn live_runtime_autoscale_scorecard_writes_product_path_artifact() {
         let autoscale_observation = evidence.observed_autoscale_harness();
         samples.extend(evidence.samples);
         traces.extend(evidence.traces);
+        let ready_queue_capacity = Box::pin(collect_live_autoscale_ready_queue_capacity(
+            autoscale_observation.snappy_ready_queue_capacity_target(),
+        ))
+        .await;
+        let autoscale_observation =
+            autoscale_observation.with_ready_queue_capacity(ready_queue_capacity);
+        let product_density_levels = live_runtime_density_levels(
+            std::env::var_os("FIRKIN_LIVE_PRODUCT_POD_READY_DECK_DENSITY_LEVELS").as_deref(),
+            &[1, 2, 4, 8, 16, 24, 32],
+        );
+        let (product_density_samples, product_density_traces) = Box::pin(
+            collect_live_product_pod_ready_deck_density_samples(&product_density_levels),
+        )
+        .await;
+        samples.extend(product_density_samples);
+        traces.extend(product_density_traces);
         let prestarted_slot_density_levels = live_runtime_density_levels(
             std::env::var_os("FIRKIN_LIVE_PRODUCT_POD_PRESTARTED_AGENT_SLOT_DENSITY_LEVELS")
                 .as_deref(),
-            &[1, 2, 4],
+            &[1, 2, 4, 8, 16, 24, 32],
         );
         let (prestarted_slot_density_samples, prestarted_slot_density_traces) = Box::pin(
             collect_live_product_pod_prestarted_agent_slot_density_samples(
@@ -2648,7 +2763,8 @@ async fn live_runtime_autoscale_scorecard_writes_product_path_artifact() {
         .await;
         samples.extend(prestarted_slot_density_samples);
         traces.extend(prestarted_slot_density_traces);
-        let (pressure_samples, pressure_traces) = live_autoscale_pressure_scenario_samples();
+        let (pressure_samples, pressure_traces) =
+            Box::pin(live_autoscale_pressure_scenario_samples()).await;
         samples.extend(pressure_samples);
         traces.extend(pressure_traces);
         samples.extend(live_autoscale_harness_samples(autoscale_observation));
@@ -2815,7 +2931,7 @@ async fn live_runtime_product_pod_ready_deck_density_writes_breakpoint_sample() 
     let artifact_temp = tempfile::tempdir().expect("artifact tempdir");
     let density_levels = live_runtime_density_levels(
         std::env::var_os("FIRKIN_LIVE_PRODUCT_POD_READY_DECK_DENSITY_LEVELS").as_deref(),
-        &[1, 2, 4],
+        &[1, 2, 4, 8, 16, 24, 32],
     );
     let (samples, traces) =
         collect_live_product_pod_ready_deck_density_samples(&density_levels).await;
@@ -2854,7 +2970,7 @@ async fn live_runtime_product_pod_prestarted_agent_slot_density_writes_breakpoin
     let artifact_temp = tempfile::tempdir().expect("artifact tempdir");
     let density_levels = live_runtime_density_levels(
         std::env::var_os("FIRKIN_LIVE_PRODUCT_POD_PRESTARTED_AGENT_SLOT_DENSITY_LEVELS").as_deref(),
-        &[1, 2, 4],
+        &[1, 2, 4, 8, 16, 24, 32],
     );
     let (samples, traces) =
         collect_live_product_pod_prestarted_agent_slot_density_samples(&density_levels).await;
@@ -2878,10 +2994,11 @@ async fn live_runtime_product_pod_prestarted_agent_slot_density_writes_breakpoin
         Some("prestarted_agent_slot")
     );
     assert_eq!(sample.tag_value("excludes_container_add"), Some("true"));
+    let expected_traces = density_levels.iter().sum::<usize>();
     assert_eq!(
         traces.len(),
-        7,
-        "levels [1, 2, 4] must preserve one trace per checked-out slot"
+        expected_traces,
+        "each configured prestarted slot density level must preserve one trace per checked-out slot"
     );
     let artifact = live_runtime_product_pod_prestarted_agent_slot_density_artifact_path(
         artifact_temp.path(),
@@ -2950,6 +3067,95 @@ async fn live_runtime_retained_shell_batch_100_writes_snappy_sample() {
 }
 
 #[tokio::test]
+#[ignore = "live VM-backed warm start proof; requires signed test harness"]
+async fn live_runtime_warm_to_first_stdout_writes_repeat_samples() {
+    let artifact_temp = tempfile::tempdir().expect("artifact tempdir");
+    let repeats = live_runtime_repeat_count(
+        std::env::var_os("FIRKIN_LIVE_WARM_TO_FIRST_STDOUT_REPEATS").as_deref(),
+    );
+    let mut samples = Vec::with_capacity(repeats);
+    for repeat in 0..repeats {
+        let repeat_samples = collect_live_warm_ready_benchmark_samples().await;
+        assert!(
+            repeat_samples
+                .iter()
+                .any(|sample| sample.metric() == "start.warm_to_first_stdout_ms"),
+            "warm-to-first-stdout sample"
+        );
+        samples.extend(tag_live_repeat_samples(repeat_samples, repeat, repeats));
+    }
+    let artifact = live_runtime_warm_to_first_stdout_artifact_path(
+        artifact_temp.path(),
+        std::env::var_os("FIRKIN_LIVE_WARM_TO_FIRST_STDOUT_ARTIFACT").as_deref(),
+    );
+    if let Some(parent) = artifact.parent() {
+        std::fs::create_dir_all(parent).expect("create warm-to-first-stdout artifact parent");
+    }
+    write_live_raw_sample_artifact(&artifact, "live_warm_to_first_stdout", samples);
+    assert!(artifact.exists());
+}
+
+#[tokio::test]
+#[ignore = "live VM-backed hot start proof; requires signed test harness"]
+async fn live_runtime_hot_to_first_stdout_writes_repeat_samples() {
+    let artifact_temp = tempfile::tempdir().expect("artifact tempdir");
+    let repeats = live_runtime_repeat_count_with_default(
+        std::env::var_os("FIRKIN_LIVE_HOT_TO_FIRST_STDOUT_REPEATS").as_deref(),
+        10,
+    );
+    let samples = collect_live_hot_to_first_stdout_samples(repeats).await;
+    assert_eq!(samples.len(), repeats);
+    let artifact = live_runtime_hot_to_first_stdout_artifact_path(
+        artifact_temp.path(),
+        std::env::var_os("FIRKIN_LIVE_HOT_TO_FIRST_STDOUT_ARTIFACT").as_deref(),
+    );
+    if let Some(parent) = artifact.parent() {
+        std::fs::create_dir_all(parent).expect("create hot-to-first-stdout artifact parent");
+    }
+    write_live_raw_sample_artifact(&artifact, "live_hot_to_first_stdout", samples);
+    assert!(artifact.exists());
+}
+
+#[tokio::test]
+#[ignore = "live VM-backed resume proof; requires signed test harness"]
+async fn live_runtime_resume_to_first_stdout_writes_repeat_samples() {
+    let artifact_temp = tempfile::tempdir().expect("artifact tempdir");
+    let repeats = live_runtime_repeat_count(
+        std::env::var_os("FIRKIN_LIVE_RESUME_TO_FIRST_STDOUT_REPEATS").as_deref(),
+    );
+    let mut samples = Vec::with_capacity(repeats);
+    let restore_timing_samples = Arc::new(Mutex::new(Vec::new()));
+    for repeat in 0..repeats {
+        let repeat_samples = collect_live_resume_to_first_stdout_benchmark_samples_with_timings(
+            Some(Arc::clone(&restore_timing_samples)),
+        )
+        .await;
+        assert!(
+            repeat_samples
+                .iter()
+                .any(|sample| sample.metric() == "start.resume_to_first_stdout_ms"),
+            "resume-to-first-stdout sample"
+        );
+        samples.extend(tag_live_repeat_samples(repeat_samples, repeat, repeats));
+    }
+    let artifact = live_runtime_resume_to_first_stdout_artifact_path(
+        artifact_temp.path(),
+        std::env::var_os("FIRKIN_LIVE_RESUME_TO_FIRST_STDOUT_ARTIFACT").as_deref(),
+    );
+    if let Some(parent) = artifact.parent() {
+        std::fs::create_dir_all(parent).expect("create resume-to-first-stdout artifact parent");
+    }
+    write_live_raw_sample_artifact(&artifact, "live_resume_to_first_stdout", samples);
+    write_restore_timing_artifact(
+        &artifact.with_extension("restore-timings.json"),
+        &restore_timing_samples
+            .lock()
+            .expect("lock restore timing samples"),
+    );
+    assert!(artifact.exists());
+}
+
+#[tokio::test]
 #[ignore = "live VM-backed retained-shell density proof; requires signed test harness"]
 async fn live_runtime_retained_shell_density_reuse_writes_repeat_samples() {
     let artifact_temp = tempfile::tempdir().expect("artifact tempdir");
@@ -2965,7 +3171,7 @@ async fn live_runtime_retained_shell_density_reuse_writes_repeat_samples() {
     let builder_id = "live-retained-shell-density";
     let (_temp, snapshot_path) = save_live_snapshot(rootfs.clone(), builder_id).await;
     let adapter = live_envd_adapter(rootfs, builder_id);
-    let backend = live_backend_with_template(adapter, &snapshot_path);
+    let backend = live_backend_with_template(adapter.clone(), &snapshot_path);
 
     let control_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let control_url = format!("http://{}", control_listener.local_addr().unwrap());
@@ -2981,7 +3187,8 @@ async fn live_runtime_retained_shell_density_reuse_writes_repeat_samples() {
     let sandbox =
         create_live_sdk_sandbox(live_sdk_config(&control_url, &proxy_url, "sbx_firkin_1")).await;
     let samples =
-        collect_retained_shell_density_reused_samples(&sandbox, &density_levels, repeats).await;
+        collect_retained_shell_density_reused_samples(&adapter, &sandbox, &density_levels, repeats)
+            .await;
     assert_eq!(samples.len(), density_levels.len() * repeats);
     let artifact = live_runtime_retained_shell_density_artifact_path(
         artifact_temp.path(),
@@ -2991,6 +3198,64 @@ async fn live_runtime_retained_shell_density_reuse_writes_repeat_samples() {
         std::fs::create_dir_all(parent).expect("create retained shell density artifact parent");
     }
     write_live_retained_shell_density_artifact(&artifact, samples, Vec::new());
+    assert!(artifact.exists());
+    assert!(sandbox.kill().await.unwrap());
+
+    proxy_task.abort();
+    control_task.abort();
+}
+
+#[tokio::test]
+#[ignore = "live VM-backed retained-shell send-path proof; requires signed test harness"]
+async fn live_runtime_retained_shell_send_path_writes_repeat_samples() {
+    let artifact_temp = tempfile::tempdir().expect("artifact tempdir");
+    let repeats = live_runtime_repeat_count_with_default(
+        std::env::var_os("FIRKIN_LIVE_RETAINED_SHELL_SEND_PATH_REPEATS").as_deref(),
+        10,
+    );
+    let density_levels = live_runtime_density_levels(
+        std::env::var_os("FIRKIN_LIVE_RETAINED_SHELL_SEND_PATH_LEVELS").as_deref(),
+        &[1, 2, 4, 8],
+    );
+    let rootfs = live_arm64_bash_rootfs().await;
+    let builder_id = "live-retained-shell-send-path";
+    let (_temp, snapshot_path) = save_live_snapshot(rootfs.clone(), builder_id).await;
+    let adapter = live_envd_adapter(rootfs, builder_id);
+    let backend = live_backend_with_template(adapter.clone(), &snapshot_path);
+
+    let control_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_url = format!("http://{}", control_listener.local_addr().unwrap());
+    let control_plane = ControlPlaneHttpServer::new(backend);
+    let proxy =
+        DomainProxyHttpServer::from_control_plane(&control_plane, hostname!("cube.localhost"));
+    let control_task = tokio::spawn(control_plane.serve(control_listener));
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
+    let proxy_task = tokio::spawn(proxy.serve(proxy_listener));
+
+    let sandbox =
+        create_live_sdk_sandbox(live_sdk_config(&control_url, &proxy_url, "sbx_firkin_1")).await;
+    let client = reqwest::Client::new();
+    let envd_url = live_envd_url_for_sandbox(&adapter, sandbox.sandbox_id()).await;
+    let samples = collect_retained_shell_send_path_samples(
+        &sandbox,
+        &client,
+        &proxy_url,
+        &envd_url,
+        repeats,
+        &density_levels,
+    )
+    .await;
+    assert_eq!(samples.len(), repeats * 6 * (density_levels.len() + 1));
+    let artifact = live_runtime_retained_shell_send_path_artifact_path(
+        artifact_temp.path(),
+        std::env::var_os("FIRKIN_LIVE_RETAINED_SHELL_SEND_PATH_ARTIFACT").as_deref(),
+    );
+    if let Some(parent) = artifact.parent() {
+        std::fs::create_dir_all(parent).expect("create retained shell send-path artifact parent");
+    }
+    write_live_raw_sample_artifact(&artifact, "live_retained_shell_send_path", samples);
     assert!(artifact.exists());
     assert!(sandbox.kill().await.unwrap());
 
@@ -3012,7 +3277,7 @@ async fn live_runtime_direct_exec_first_stdout_writes_repeat_samples() {
     let adapter = live_envd_adapter(rootfs, builder_id);
     let sandbox = start_live_envd_sandbox(&adapter, &snapshot_path).await;
     let samples = collect_direct_exec_first_stdout_samples(&adapter, repeats).await;
-    assert_eq!(samples.len(), repeats);
+    assert_eq!(samples.len(), repeats * 2);
     let artifact = live_runtime_direct_exec_artifact_path(
         artifact_temp.path(),
         std::env::var_os("FIRKIN_LIVE_DIRECT_EXEC_FIRST_STDOUT_ARTIFACT").as_deref(),
@@ -3035,7 +3300,18 @@ async fn live_runtime_product_pod_disk_reclaim_writes_staged_samples() {
     let image_format = live_runtime_product_pod_disk_reclaim_image_format(
         std::env::var_os("FIRKIN_LIVE_PRODUCT_POD_DISK_RECLAIM_IMAGE_FORMAT").as_deref(),
     );
-    let samples = collect_live_product_pod_disk_reclaim_samples_for_format(image_format).await;
+    let repeats = live_runtime_repeat_count_with_default(
+        std::env::var_os("FIRKIN_LIVE_PRODUCT_POD_DISK_RECLAIM_REPEATS").as_deref(),
+        1,
+    );
+    let mut samples = Vec::new();
+    for repeat in 0..repeats {
+        samples.extend(tag_live_repeat_samples(
+            collect_live_product_pod_disk_reclaim_samples_for_format(image_format).await,
+            repeat,
+            repeats,
+        ));
+    }
     assert!(
         samples
             .iter()
@@ -3190,12 +3466,49 @@ fn live_runtime_retained_batch_artifact_path(
     override_path.map_or_else(|| temp.join("live-retained-batch-100.json"), PathBuf::from)
 }
 
+fn live_runtime_warm_to_first_stdout_artifact_path(
+    temp: &Path,
+    override_path: Option<&OsStr>,
+) -> PathBuf {
+    override_path.map_or_else(
+        || temp.join("live-warm-to-first-stdout.json"),
+        PathBuf::from,
+    )
+}
+
+fn live_runtime_hot_to_first_stdout_artifact_path(
+    temp: &Path,
+    override_path: Option<&OsStr>,
+) -> PathBuf {
+    override_path.map_or_else(|| temp.join("live-hot-to-first-stdout.json"), PathBuf::from)
+}
+
+fn live_runtime_resume_to_first_stdout_artifact_path(
+    temp: &Path,
+    override_path: Option<&OsStr>,
+) -> PathBuf {
+    override_path.map_or_else(
+        || temp.join("live-resume-to-first-stdout.json"),
+        PathBuf::from,
+    )
+}
+
 fn live_runtime_retained_shell_density_artifact_path(
     temp: &Path,
     override_path: Option<&OsStr>,
 ) -> PathBuf {
     override_path.map_or_else(
         || temp.join("live-retained-shell-density.json"),
+        PathBuf::from,
+    )
+}
+
+fn live_runtime_retained_shell_send_path_artifact_path(
+    temp: &Path,
+    override_path: Option<&OsStr>,
+) -> PathBuf {
+    override_path.map_or_else(
+        || temp.join("live-retained-shell-send-path.json"),
         PathBuf::from,
     )
 }
@@ -3430,6 +3743,26 @@ fn live_runtime_autoscale_artifact_path_uses_override_when_present() {
     assert_eq!(
         live_runtime_autoscale_artifact_path(Path::new("/tmp/firkin-live-temp"), None),
         PathBuf::from("/tmp/firkin-live-temp/live-autoscale-scorecard.json")
+    );
+}
+
+#[test]
+fn live_runtime_retained_shell_send_path_artifact_path_uses_override_when_present() {
+    assert_eq!(
+        live_runtime_retained_shell_send_path_artifact_path(
+            Path::new("/tmp/firkin-live-temp"),
+            Some(std::ffi::OsStr::new(
+                "/tmp/firkin-live-retained-shell-send-path.json"
+            ))
+        ),
+        PathBuf::from("/tmp/firkin-live-retained-shell-send-path.json")
+    );
+    assert_eq!(
+        live_runtime_retained_shell_send_path_artifact_path(
+            Path::new("/tmp/firkin-live-temp"),
+            None
+        ),
+        PathBuf::from("/tmp/firkin-live-temp/live-retained-shell-send-path.json")
     );
 }
 
@@ -3758,6 +4091,16 @@ fn real_product_pod_ready_deck_sample_is_promotable_resume_boundary() {
         sample.tag_value("pod_surface"),
         Some("product_pod_ready_deck")
     );
+    assert_eq!(
+        sample.tag_value("slot_surface"),
+        Some("prestarted_agent_slot")
+    );
+    assert_eq!(sample.tag_value("excludes_container_add"), Some("true"));
+    assert_eq!(
+        sample.tag_value("ready_signal"),
+        Some("request_fifo_acceptance")
+    );
+    assert_eq!(sample.tag_value("output_wait_preserved"), Some("true"));
 }
 
 #[test]
@@ -3799,6 +4142,19 @@ fn product_pod_ready_deck_artifact_preserves_resume_boundary_tags() {
         value["samples"][0]["tags"]["database_boundary"],
         "real_db_sidecar"
     );
+    assert_eq!(
+        value["samples"][0]["tags"]["slot_surface"],
+        "prestarted_agent_slot"
+    );
+    assert_eq!(
+        value["samples"][0]["tags"]["excludes_container_add"],
+        "true"
+    );
+    assert_eq!(
+        value["samples"][0]["tags"]["ready_signal"],
+        "request_fifo_acceptance"
+    );
+    assert_eq!(value["samples"][0]["tags"]["output_wait_preserved"], "true");
     assert_eq!(
         value["traces"][0]["events"][4]["name"],
         "AgentComputerReady"
@@ -3864,11 +4220,21 @@ fn product_pod_ready_deck_density_artifact_preserves_metric_and_traces() {
     let mut trace = agent_computer_event_trace(LifecycleClass::Resumed);
     trace.record(SandboxEventName::AgentComputerResumed);
     trace.record_at_elapsed(
+        SandboxEventName::AgentComputerSandboxCreated,
+        Duration::from_millis(12),
+    );
+    trace.record_at_elapsed(
+        SandboxEventName::AgentComputerProbeStart,
+        Duration::from_millis(12),
+    );
+    trace.record_at_elapsed(
         SandboxEventName::AgentComputerReady,
         Duration::from_millis(20),
     );
     let event_trace = trace.finish();
     let level_sample = product_pod_ready_deck_density_level_sample(4, "1,4", 35.0);
+    let add_sample = product_pod_ready_deck_container_add_level_sample(4, "1,4", 12.0);
+    let output_wait_sample = product_pod_ready_deck_output_wait_level_sample(4, "1,4", 8.0);
     let sample = max_active_before_p95_doubles([
         DensityP95Point::new(1, 20.0),
         DensityP95Point::new(4, 35.0),
@@ -3880,7 +4246,7 @@ fn product_pod_ready_deck_density_artifact_preserves_metric_and_traces() {
 
     write_live_product_pod_ready_deck_density_artifact(
         &artifact,
-        vec![level_sample, sample],
+        vec![level_sample, add_sample, output_wait_sample, sample],
         vec![event_trace],
     );
 
@@ -3906,17 +4272,109 @@ fn product_pod_ready_deck_density_artifact_preserves_metric_and_traces() {
     assert_eq!(value["samples"][0]["tags"]["concurrency_levels"], "1,4");
     assert_eq!(
         value["samples"][1]["metric"],
+        "debug.product.agent_computer_container_add_c4_ms"
+    );
+    assert_eq!(value["samples"][1]["value"], 12.0);
+    assert_eq!(
+        value["samples"][1]["tags"]["measurement_boundary"],
+        "product_path_container_add"
+    );
+    assert_eq!(value["samples"][1]["tags"]["phase"], "pod_container_add");
+    assert_eq!(
+        value["samples"][1]["tags"]["ready_signal"],
+        "container_added_before_agent_output"
+    );
+    assert_eq!(
+        value["samples"][2]["metric"],
+        "debug.product.agent_computer_output_wait_c4_ms"
+    );
+    assert_eq!(value["samples"][2]["value"], 8.0);
+    assert_eq!(
+        value["samples"][2]["tags"]["measurement_boundary"],
+        "product_path_output_wait"
+    );
+    assert_eq!(
+        value["samples"][2]["tags"]["phase"],
+        "agent_output_after_container_add"
+    );
+    assert_eq!(
+        value["samples"][2]["tags"]["ready_signal"],
+        "agent_computer_ready_after_container_add"
+    );
+    assert_eq!(
+        value["samples"][3]["metric"],
         MAX_AGENT_COMPUTERS_BEFORE_READY_P95_DOUBLES_METRIC
     );
-    assert_eq!(value["samples"][1]["value"], 4.0);
+    assert_eq!(value["samples"][3]["value"], 4.0);
     assert_eq!(
-        value["samples"][1]["tags"]["confidence"],
+        value["samples"][3]["tags"]["confidence"],
         PercentileAvailability::SuperfastIteration.as_str()
     );
     assert_eq!(
         value["traces"][0]["events"][0]["name"],
         "AgentComputerResumed"
     );
+}
+
+#[test]
+fn product_pod_ready_deck_degradation_samples_are_diagnostic() {
+    let samples = product_pod_ready_deck_degradation_samples(
+        &[
+            DensityP95Point::new(1, 50.0),
+            DensityP95Point::new(4, 60.0),
+            DensityP95Point::new(8, 80.0),
+            DensityP95Point::new(24, 170.0),
+        ],
+        "1,4,8,24",
+    );
+
+    let c4 = samples
+        .iter()
+        .find(|sample| {
+            sample.metric() == "debug.product.agent_computer_ready_deck_p95_degradation_c4_ratio"
+        })
+        .expect("c4 degradation sample");
+    assert_eq!(c4.value(), 1.2);
+    assert_eq!(
+        c4.tag_value("measurement_boundary"),
+        Some("product_path_density_degradation")
+    );
+    assert_eq!(c4.tag_value("degradation_status"), Some("diagnostic_only"));
+    assert_eq!(c4.tag_value("baseline_p95_ms"), Some("50.000000"));
+    assert_eq!(c4.tag_value("level_p95_ms"), Some("60.000000"));
+
+    let c8 = samples
+        .iter()
+        .find(|sample| {
+            sample.metric() == "debug.product.agent_computer_ready_deck_p95_degradation_c8_ratio"
+        })
+        .expect("c8 degradation sample");
+    assert_eq!(c8.value(), 1.6);
+    assert_eq!(c8.tag_value("degradation_status"), Some("diagnostic_only"));
+
+    let c24 = samples
+        .iter()
+        .find(|sample| {
+            sample.metric() == "debug.product.agent_computer_ready_deck_p95_degradation_c24_ratio"
+        })
+        .expect("c24 degradation sample");
+    assert_eq!(c24.tag_value("degradation_status"), Some("diagnostic_only"));
+}
+
+#[test]
+fn product_pod_ready_deck_level_samples_report_capacity_tier_status() {
+    let c8 = product_pod_ready_deck_density_level_sample(8, "1,4,8", 225.0);
+    assert_eq!(c8.tag_value("density_tier"), Some("snappy_8"));
+    assert_eq!(c8.tag_value("capacity_max_ready_ms"), Some("250.000000"));
+    assert_eq!(c8.tag_value("capacity_status"), Some("pass"));
+
+    let c16 = product_pod_ready_deck_density_level_sample(16, "1,4,8,16", 550.0);
+    assert_eq!(c16.tag_value("density_tier"), Some("degraded_16"));
+    assert_eq!(c16.tag_value("capacity_max_ready_ms"), Some("500.000000"));
+    assert_eq!(c16.tag_value("capacity_status"), Some("miss"));
+
+    let c24 = product_pod_ready_deck_density_level_sample(24, "1,4,8,16,24", 505.0);
+    assert_eq!(c24.tag_value("capacity_status"), Some("observed_no_tier"));
 }
 
 #[test]
@@ -3933,6 +4391,7 @@ fn product_pod_prestarted_agent_slot_density_artifact_preserves_metric_and_tags(
     );
     let event_trace = trace.finish();
     let level_sample = prestarted_agent_slot_density_level_sample(4, "1,4", 15.0);
+    let output_wait_sample = prestarted_agent_slot_output_wait_level_sample(4, "1,4", 3.0);
     let sample = max_active_before_p95_doubles([
         DensityP95Point::new(1, 8.0),
         DensityP95Point::new(4, 15.0),
@@ -3969,7 +4428,12 @@ fn product_pod_prestarted_agent_slot_density_artifact_preserves_metric_and_tags(
 
     write_live_product_pod_prestarted_agent_slot_density_artifact(
         &artifact,
-        vec![level_sample, sample, snappy_guard_sample],
+        vec![
+            level_sample,
+            output_wait_sample,
+            sample,
+            snappy_guard_sample,
+        ],
         vec![event_trace],
     );
 
@@ -3995,70 +4459,171 @@ fn product_pod_prestarted_agent_slot_density_artifact_preserves_metric_and_tags(
         "request_fifo_acceptance"
     );
     assert_eq!(value["samples"][0]["tags"]["output_wait_preserved"], "true");
+    assert_eq!(
+        value["samples"][0]["tags"]["phase"],
+        "host_control_file_write"
+    );
     assert_eq!(value["samples"][0]["tags"]["concurrency_level"], "4");
     assert_eq!(value["samples"][0]["tags"]["concurrency_levels"], "1,4");
     assert_eq!(
         value["samples"][1]["metric"],
-        MAX_PRESTARTED_AGENT_SLOTS_BEFORE_CHECKOUT_READY_P95_DOUBLES_METRIC
+        "debug.product.prestarted_agent_slot_output_wait_c4_ms"
     );
-    assert_eq!(value["samples"][1]["value"], 4.0);
+    assert_eq!(value["samples"][1]["value"], 3.0);
     assert_eq!(
         value["samples"][1]["tags"]["measurement_boundary"],
-        "prestarted_slot_checkout"
+        "prestarted_slot_output_wait"
     );
     assert_eq!(
-        value["samples"][1]["tags"]["probe_surface"],
-        "browser_db_cli_readiness"
-    );
-    assert_eq!(value["samples"][1]["tags"]["cli_boundary"], "real_cli");
-    assert_eq!(
-        value["samples"][1]["tags"]["browser_boundary"],
-        "real_browser_sidecar"
-    );
-    assert_eq!(
-        value["samples"][1]["tags"]["database_boundary"],
-        "real_db_sidecar"
-    );
-    assert_eq!(
-        value["samples"][1]["tags"]["pod_surface"],
-        "product_pod_ready_deck"
-    );
-    assert_eq!(
-        value["samples"][1]["tags"]["slot_surface"],
-        "prestarted_agent_slot"
-    );
-    assert_eq!(
-        value["samples"][1]["tags"]["excludes_container_add"],
-        "true"
+        value["samples"][1]["tags"]["phase"],
+        "slot_process_completion_after_acceptance"
     );
     assert_eq!(
         value["samples"][1]["tags"]["ready_signal"],
-        "request_fifo_acceptance"
+        "agent_slot_ready_after_fifo_acceptance"
     );
     assert_eq!(
-        value["samples"][1]["tags"]["confidence"],
-        PercentileAvailability::SuperfastIteration.as_str()
+        value["samples"][1]["tags"]["checkout_wait_preserved"],
+        "true"
     );
-    assert_eq!(value["samples"][1]["tags"]["concurrency_levels"], "1,2,4");
-    assert_eq!(value["samples"][1]["tags"]["prestarted_slots"], "7");
-    assert_eq!(value["samples"][1]["tags"]["baseline_p95_ms"], "8.000000");
-    assert_eq!(value["samples"][1]["tags"]["threshold_p95_ms"], "16.000000");
     assert_eq!(
         value["samples"][2]["metric"],
-        "density.prestarted_agent_slot_fifo_acceptance_p95_ms"
+        MAX_PRESTARTED_AGENT_SLOTS_BEFORE_CHECKOUT_READY_P95_DOUBLES_METRIC
     );
-    assert_eq!(value["samples"][2]["value"], 15.0);
+    assert_eq!(value["samples"][2]["value"], 4.0);
     assert_eq!(
         value["samples"][2]["tags"]["measurement_boundary"],
         "prestarted_slot_checkout"
     );
     assert_eq!(
+        value["samples"][2]["tags"]["probe_surface"],
+        "browser_db_cli_readiness"
+    );
+    assert_eq!(value["samples"][2]["tags"]["cli_boundary"], "real_cli");
+    assert_eq!(
+        value["samples"][2]["tags"]["browser_boundary"],
+        "real_browser_sidecar"
+    );
+    assert_eq!(
+        value["samples"][2]["tags"]["database_boundary"],
+        "real_db_sidecar"
+    );
+    assert_eq!(
+        value["samples"][2]["tags"]["pod_surface"],
+        "product_pod_ready_deck"
+    );
+    assert_eq!(
+        value["samples"][2]["tags"]["slot_surface"],
+        "prestarted_agent_slot"
+    );
+    assert_eq!(
+        value["samples"][2]["tags"]["excludes_container_add"],
+        "true"
+    );
+    assert_eq!(
         value["samples"][2]["tags"]["ready_signal"],
         "request_fifo_acceptance"
     );
-    assert_eq!(value["samples"][2]["tags"]["snappy_target_ms"], "5");
-    assert_eq!(value["samples"][2]["tags"]["max_concurrency_level"], "4");
+    assert_eq!(
+        value["samples"][2]["tags"]["confidence"],
+        PercentileAvailability::SuperfastIteration.as_str()
+    );
+    assert_eq!(value["samples"][2]["tags"]["concurrency_levels"], "1,2,4");
+    assert_eq!(value["samples"][2]["tags"]["prestarted_slots"], "7");
+    assert_eq!(value["samples"][2]["tags"]["baseline_p95_ms"], "8.000000");
+    assert_eq!(value["samples"][2]["tags"]["threshold_p95_ms"], "16.000000");
+    assert_eq!(
+        value["samples"][3]["metric"],
+        "density.prestarted_agent_slot_fifo_acceptance_p95_ms"
+    );
+    assert_eq!(value["samples"][3]["value"], 15.0);
+    assert_eq!(
+        value["samples"][3]["tags"]["measurement_boundary"],
+        "prestarted_slot_checkout"
+    );
+    assert_eq!(
+        value["samples"][3]["tags"]["ready_signal"],
+        "request_fifo_acceptance"
+    );
+    assert_eq!(value["samples"][3]["tags"]["snappy_target_ms"], "5");
+    assert_eq!(value["samples"][3]["tags"]["max_concurrency_level"], "4");
     assert_eq!(value["traces"].as_array().expect("traces array").len(), 1);
+}
+
+#[test]
+fn product_pod_ready_deck_add_phase_level_samples_summarize_backend_phases() {
+    let raw_samples = vec![
+        BenchmarkSample::new(
+            "debug.single_node.pod_container_add_prepare_ms",
+            BenchmarkMetricKind::LifecycleLatency,
+            BenchmarkUnit::Milliseconds,
+            11.0,
+        )
+        .with_static_tag("measurement_boundary", "single_node_pod_container_add")
+        .with_static_tag("phase", "prepare"),
+        BenchmarkSample::new(
+            "debug.single_node.pod_container_add_prepare_ms",
+            BenchmarkMetricKind::LifecycleLatency,
+            BenchmarkUnit::Milliseconds,
+            17.0,
+        )
+        .with_static_tag("measurement_boundary", "single_node_pod_container_add")
+        .with_static_tag("phase", "prepare"),
+        BenchmarkSample::new(
+            "debug.single_node.pod_container_add_start_ms",
+            BenchmarkMetricKind::LifecycleLatency,
+            BenchmarkUnit::Milliseconds,
+            23.0,
+        )
+        .with_static_tag("measurement_boundary", "single_node_pod_container_add")
+        .with_static_tag("phase", "start"),
+        BenchmarkSample::new(
+            "debug.single_node.pod_container_add_start_process_rpc_ms",
+            BenchmarkMetricKind::LifecycleLatency,
+            BenchmarkUnit::Milliseconds,
+            19.0,
+        )
+        .with_static_tag("measurement_boundary", "single_node_pod_container_add")
+        .with_static_tag("phase", "start_process_rpc"),
+    ];
+
+    let samples = product_pod_ready_deck_add_phase_level_samples(8, "1,8", &raw_samples);
+
+    let prepare = samples
+        .iter()
+        .find(|sample| {
+            sample.metric() == "debug.product.agent_computer_pod_add_prepare_overlay_c8_ms"
+        })
+        .expect("prepare phase sample");
+    assert_eq!(prepare.value(), 17.0);
+    assert_eq!(
+        prepare.tag_value("measurement_boundary"),
+        Some("product_path_pod_add_phase")
+    );
+    assert_eq!(prepare.tag_value("phase"), Some("prepare_overlay"));
+    assert_eq!(
+        prepare.tag_value("source_boundary"),
+        Some("single_node_pod_container_add")
+    );
+    assert_eq!(prepare.tag_value("concurrency_level"), Some("8"));
+    assert_eq!(prepare.tag_value("concurrency_levels"), Some("1,8"));
+
+    let start = samples
+        .iter()
+        .find(|sample| {
+            sample.metric() == "debug.product.agent_computer_pod_add_start_container_c8_ms"
+        })
+        .expect("start phase sample");
+    assert_eq!(start.value(), 23.0);
+
+    let start_rpc = samples
+        .iter()
+        .find(|sample| {
+            sample.metric() == "debug.product.agent_computer_pod_add_start_process_rpc_c8_ms"
+        })
+        .expect("start process rpc phase sample");
+    assert_eq!(start_rpc.value(), 19.0);
+    assert_eq!(start_rpc.tag_value("phase"), Some("start_process_rpc"));
 }
 
 #[test]
@@ -4149,7 +4714,7 @@ fn product_pod_disk_reclaim_artifact_tags_samples_with_count_confidence() {
     );
     assert_eq!(
         value["samples"][0]["tags"]["confidence"],
-        PercentileAvailability::FastIteration.as_str()
+        PercentileAvailability::SmokeOnly.as_str()
     );
     assert_eq!(value["samples"][0]["tags"]["image_format"], "asif");
     assert_eq!(value["samples"][1]["tags"]["image_format"], "asif");
@@ -4168,14 +4733,14 @@ fn retained_shell_density_artifact_tags_each_metric_with_own_count_confidence() 
                     1,
                     repeat,
                     10,
-                    0.8,
+                    RetainedShellDispatchObservation::from_millis_for_test(0.8, 1),
                 ),
                 retained_shell_density_sample(
                     "debug.exec.retained_shell_first_stdout_c2_ms",
                     2,
                     repeat,
                     10,
-                    1.2,
+                    RetainedShellDispatchObservation::from_millis_for_test(1.2, 2),
                 ),
             ]
         })
@@ -4190,19 +4755,58 @@ fn retained_shell_density_artifact_tags_each_metric_with_own_count_confidence() 
     assert_eq!(value["kind"], "live_retained_shell_density");
     assert_eq!(
         value["samples"].as_array().expect("samples array").len(),
-        20
+        21
+    );
+    let derived = value["samples"]
+        .as_array()
+        .expect("samples array")
+        .iter()
+        .find(|sample| {
+            sample["metric"] == MAX_RETAINED_SHELLS_BEFORE_FIRST_STDOUT_P95_DOUBLES_METRIC
+        })
+        .expect("retained shell density breakpoint sample");
+    assert_eq!(derived["value"], 2.0);
+    assert_eq!(
+        derived["tags"]["source"],
+        "density-retained-shell-first-stdout-p95-threshold"
     );
     assert_eq!(
+        derived["tags"]["confidence"],
+        PercentileAvailability::SmokeOnly.as_str()
+    );
+    assert_eq!(derived["tags"]["concurrency_levels"], "1,2");
+    assert_eq!(derived["tags"]["underlying_samples_per_level_min"], "10");
+    assert_eq!(derived["tags"]["baseline_p95_ms"], "0.800000");
+    assert_eq!(derived["tags"]["threshold_p95_ms"], "1.600000");
+    assert_eq!(
         value["samples"][0]["tags"]["confidence"],
-        PercentileAvailability::FastIteration.as_str()
+        PercentileAvailability::BaselineCheckpoint.as_str()
     );
     assert_eq!(value["samples"][0]["tags"]["repeat_count"], "10");
     assert_eq!(value["samples"][0]["tags"]["concurrency_level"], "1");
+    assert_eq!(value["samples"][0]["tags"]["connect_polls_max"], "1");
+    assert_eq!(
+        value["samples"][0]["tags"]["dispatch_transport"],
+        "connect_snapshot"
+    );
+    assert_eq!(value["samples"][0]["tags"]["send_stdin_ms"], "0.400000");
+    assert_eq!(value["samples"][0]["tags"]["output_wait_ms"], "0.400000");
+    assert_eq!(
+        value["samples"][0]["tags"]["runtime_stdin_write_max_ms"],
+        "0.400000"
+    );
     assert_eq!(
         value["samples"][1]["tags"]["confidence"],
-        PercentileAvailability::FastIteration.as_str()
+        PercentileAvailability::BaselineCheckpoint.as_str()
     );
     assert_eq!(value["samples"][1]["tags"]["concurrency_level"], "2");
+    assert_eq!(value["samples"][1]["tags"]["connect_polls_max"], "2");
+    assert_eq!(value["samples"][1]["tags"]["send_stdin_ms"], "0.600000");
+    assert_eq!(value["samples"][1]["tags"]["output_wait_ms"], "0.600000");
+    assert_eq!(
+        value["samples"][1]["tags"]["runtime_stdin_write_max_ms"],
+        "0.600000"
+    );
 }
 
 #[test]
@@ -4212,7 +4816,7 @@ fn direct_exec_first_stdout_artifact_tags_metric_count_confidence() {
     let samples = (0..10)
         .map(|repeat| {
             BenchmarkSample::new(
-                "debug.exec.direct_first_stdout_byte_ms",
+                "exec.direct_first_stdout_byte_ms",
                 BenchmarkMetricKind::LifecycleLatency,
                 BenchmarkUnit::Milliseconds,
                 5.0 + repeat as f64,
@@ -4263,9 +4867,10 @@ fn product_pod_disk_reclaim_image_format_env_accepts_raw_and_asif() {
     );
 }
 
-#[test]
-fn live_autoscale_pressure_scenario_promotes_pressure_metrics() {
-    let (samples, traces) = live_autoscale_pressure_scenario_samples();
+#[tokio::test]
+#[ignore = "live VZ autoscale pressure/refill scenario; requires signed test harness"]
+async fn live_autoscale_pressure_scenario_emits_observed_work_metrics() {
+    let (samples, traces) = live_autoscale_pressure_scenario_samples().await;
     assert_eq!(traces.len(), 1);
 
     let covered = samples
@@ -4275,6 +4880,8 @@ fn live_autoscale_pressure_scenario_promotes_pressure_metrics() {
     let expected = [
         "autoscale.pressure_to_safe_floor_ms",
         "autoscale.pressure_clear_to_ready_target_ms",
+        "autoscale.active_evictions_due_to_pool_pressure",
+        "autoscale.reserve_floor_violations",
     ]
     .into_iter()
     .collect::<std::collections::BTreeSet<_>>();
@@ -4291,6 +4898,36 @@ fn live_autoscale_pressure_scenario_promotes_pressure_metrics() {
         );
         assert_eq!(sample.tag_value("trust"), Some("exact_host_event_pair"));
     }
+    assert_eq!(
+        samples
+            .iter()
+            .find(|sample| sample.metric() == "autoscale.pressure_to_safe_floor_ms")
+            .expect("pressure shrink")
+            .tag_value("autoscale_work_observed"),
+        Some("capacity_reclaimed")
+    );
+    assert_eq!(
+        samples
+            .iter()
+            .find(|sample| sample.metric() == "autoscale.pressure_clear_to_ready_target_ms")
+            .expect("pressure refill")
+            .tag_value("autoscale_work_observed"),
+        Some("ready_capacity_refilled")
+    );
+    for metric in [
+        "autoscale.active_evictions_due_to_pool_pressure",
+        "autoscale.reserve_floor_violations",
+    ] {
+        let sample = samples
+            .iter()
+            .find(|sample| sample.metric() == metric)
+            .expect("pressure stress protection sample");
+        assert_eq!(sample.tag_value("pressure_stress_observed"), Some("true"));
+        assert_eq!(
+            sample.tag_value("protection_evidence_scope"),
+            Some("pressure_stress")
+        );
+    }
     assert!(
         AUTOSCALE_EFFICIENCY_SCORECARD_METRICS
             .iter()
@@ -4299,7 +4936,7 @@ fn live_autoscale_pressure_scenario_promotes_pressure_metrics() {
 }
 
 #[test]
-fn live_autoscale_harness_samples_promote_scoped_ready_and_protection_metrics() {
+fn live_autoscale_harness_samples_promote_scoped_ready_metrics() {
     let samples = live_autoscale_harness_samples(LiveAutoscaleHarnessObservation::new(
         ReadyQueueOutcomes::new(2, 0),
         1,
@@ -4318,8 +4955,9 @@ fn live_autoscale_harness_samples_promote_scoped_ready_and_protection_metrics() 
     );
     assert_eq!(
         safe_spare.tag_value("ready_queue_resource_source"),
-        Some("observed_ready_hit_budget")
+        Some("observed_ready_queue_capacity_budget")
     );
+    assert_eq!(safe_spare.tag_value("ready_queue_capacity"), Some("2"));
     assert_eq!(
         safe_spare.tag_value("active_resource_source"),
         Some("runtime_active_pod_registry_budget")
@@ -4348,27 +4986,33 @@ fn live_autoscale_harness_samples_promote_scoped_ready_and_protection_metrics() 
     assert_eq!(ready_queue.tag_value("ready_hits"), Some("2"));
     assert_eq!(ready_queue.tag_value("misses"), Some("0"));
 
-    for metric in [
-        "autoscale.active_evictions_due_to_pool_pressure",
-        "autoscale.reserve_floor_violations",
-    ] {
-        let sample = samples
-            .iter()
-            .find(|sample| sample.metric() == metric)
-            .expect("protection sample");
-        assert_eq!(
-            sample.tag_value("measurement_boundary"),
-            Some("signed_live_product_path")
-        );
-        assert_eq!(
-            sample.tag_value("pressure_policy"),
-            Some("no_pool_comfort_eviction")
-        );
-        assert_eq!(
-            sample.tag_value("protection_count_source"),
-            Some("observed_harness_completion")
-        );
-    }
+    assert!(samples.iter().all(|sample| sample.metric()
+        != "autoscale.active_evictions_due_to_pool_pressure"
+        && sample.metric() != "autoscale.reserve_floor_violations"));
+}
+
+#[test]
+fn live_autoscale_harness_safe_spare_uses_observed_ready_capacity() {
+    let samples = live_autoscale_harness_samples(
+        LiveAutoscaleHarnessObservation::new(ReadyQueueOutcomes::new(2, 0), 1)
+            .with_ready_queue_capacity(11),
+    );
+    let safe_spare = samples
+        .iter()
+        .find(|sample| sample.metric() == "autoscale.safe_spare_limiting_utilization_pct")
+        .expect("safe-spare sample");
+
+    assert_eq!(safe_spare.tag_value("ready_queue_cpu_slots"), Some("11"));
+    assert_eq!(safe_spare.tag_value("ready_hits"), Some("2"));
+    assert_eq!(
+        safe_spare.tag_value("ready_queue_resource_source"),
+        Some("observed_ready_queue_capacity_budget")
+    );
+    assert!(
+        safe_spare.value() >= 70.0,
+        "filled ready queue should occupy enough safe spare capacity, got {}",
+        safe_spare.value()
+    );
 }
 
 #[test]
@@ -4730,6 +5374,12 @@ async fn collect_live_warm_ready_benchmark_samples() -> Vec<BenchmarkSample> {
 }
 
 async fn collect_live_resume_to_first_stdout_benchmark_samples() -> Vec<BenchmarkSample> {
+    collect_live_resume_to_first_stdout_benchmark_samples_with_timings(None).await
+}
+
+async fn collect_live_resume_to_first_stdout_benchmark_samples_with_timings(
+    restore_timing_samples: Option<RestoreTimingSamples>,
+) -> Vec<BenchmarkSample> {
     let rootfs = live_arm64_bash_rootfs().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let snapshot_path = temp.path().join("resume-baseline.vz");
@@ -4768,12 +5418,14 @@ async fn collect_live_resume_to_first_stdout_benchmark_samples() -> Vec<Benchmar
         .expect("capture resume baseline snapshot");
     let _ = source.stop().await;
 
+    let mut launcher = CoreSnapshotSessionLauncher::new(live_builder(builder_id, rootfs))
+        .with_state_path(&state_path);
+    if let Some(restore_timing_samples) = restore_timing_samples {
+        launcher = launcher.with_timing_samples(restore_timing_samples);
+    }
     let adapter = firkin_runtime::FirkinRuntimeAdapter::new(
         CapacityLedger::new(ResourceBudget::new(8, Size::gib(64), Size::gib(512))),
-        ReadyLiveLauncher::new(
-            CoreSnapshotSessionLauncher::new(live_builder(builder_id, rootfs))
-                .with_state_path(&state_path),
-        ),
+        ReadyLiveLauncher::new(launcher),
         ResourceBudget::new(2, Size::gib(8), Size::gib(64)),
         "cube.localhost",
         "firkin-envd",
@@ -5202,28 +5854,36 @@ async fn collect_live_sdk_lifecycle_benchmark_samples(
                 "debug.exec.retained_shell_first_stdout_ms",
                 BenchmarkMetricKind::LifecycleLatency,
                 BenchmarkUnit::Milliseconds,
-                retained_shell_dispatch.as_secs_f64() * 1000.0,
+                retained_shell_dispatch.first_stdout.as_secs_f64() * 1000.0,
             )
             .with_static_tag("measurement_boundary", "retained_shell_cli")
             .with_static_tag("shell_mode", "prestarted_stdin")
             .with_static_tag("cmd", "/bin/bash")
             .with_static_tag("args", "-l|||-c|||while-read-eval")
             .with_dynamic_tag("repeat_index", repeat.to_string())
-            .with_dynamic_tag("repeat_count", retained_shell_density_repeats.to_string()),
+            .with_dynamic_tag("repeat_count", retained_shell_density_repeats.to_string())
+            .with_dynamic_tag(
+                "connect_polls",
+                retained_shell_dispatch.connect_polls.to_string(),
+            ),
         );
         samples.push(
             BenchmarkSample::new(
                 "debug.exec.retained_shell_first_stdout_c1_ms",
                 BenchmarkMetricKind::LifecycleLatency,
                 BenchmarkUnit::Milliseconds,
-                retained_shell_dispatch.as_secs_f64() * 1000.0,
+                retained_shell_dispatch.first_stdout.as_secs_f64() * 1000.0,
             )
             .with_static_tag("measurement_boundary", "retained_shell_cli_density")
             .with_static_tag("shell_mode", "prestarted_stdin")
             .with_dynamic_tag("concurrency_level", "1")
             .with_dynamic_tag("concurrency_levels", shell_density_level_tag.clone())
             .with_dynamic_tag("repeat_index", repeat.to_string())
-            .with_dynamic_tag("repeat_count", retained_shell_density_repeats.to_string()),
+            .with_dynamic_tag("repeat_count", retained_shell_density_repeats.to_string())
+            .with_dynamic_tag(
+                "connect_polls_max",
+                retained_shell_dispatch.connect_polls.to_string(),
+            ),
         );
     }
 
@@ -5308,14 +5968,18 @@ async fn collect_live_sdk_lifecycle_benchmark_samples(
                     format!("debug.exec.retained_shell_first_stdout_c{concurrency}_ms"),
                     BenchmarkMetricKind::LifecycleLatency,
                     BenchmarkUnit::Milliseconds,
-                    retained_shell_dispatch_p95.as_secs_f64() * 1000.0,
+                    retained_shell_dispatch_p95.first_stdout.as_secs_f64() * 1000.0,
                 )
                 .with_static_tag("measurement_boundary", "retained_shell_cli_density")
                 .with_static_tag("shell_mode", "prestarted_stdin")
                 .with_dynamic_tag("concurrency_level", concurrency.to_string())
                 .with_dynamic_tag("concurrency_levels", shell_density_level_tag.clone())
                 .with_dynamic_tag("repeat_index", repeat.to_string())
-                .with_dynamic_tag("repeat_count", retained_shell_density_repeats.to_string()),
+                .with_dynamic_tag("repeat_count", retained_shell_density_repeats.to_string())
+                .with_dynamic_tag(
+                    "connect_polls_max",
+                    retained_shell_dispatch_p95.connect_polls.to_string(),
+                ),
             );
         }
         density_points.push(DensityP95Point::new(
@@ -5325,6 +5989,9 @@ async fn collect_live_sdk_lifecycle_benchmark_samples(
         for timing in sandboxes {
             assert!(timing.sandbox.kill().await.unwrap());
         }
+    }
+    if let Some(sample) = retained_shell_density_breakpoint_sample(&samples) {
+        samples.push(sample);
     }
     let density_limit = max_active_before_p95_doubles(density_points).expect("density breakpoint");
     samples.push(
@@ -5372,8 +6039,8 @@ impl LiveAgentComputerScorecardEvidence {
 #[derive(Clone, Copy, Debug)]
 struct LiveAutoscaleHarnessObservation {
     ready_queue_outcomes: ReadyQueueOutcomes,
+    ready_queue_capacity: u64,
     max_active_product_pods: u32,
-    protection_counts: AutoscaleProtectionCounts,
 }
 
 impl LiveAutoscaleHarnessObservation {
@@ -5383,9 +6050,14 @@ impl LiveAutoscaleHarnessObservation {
     fn new(ready_queue_outcomes: ReadyQueueOutcomes, max_active_product_pods: u32) -> Self {
         Self {
             ready_queue_outcomes,
+            ready_queue_capacity: ready_queue_outcomes.ready_hits(),
             max_active_product_pods,
-            protection_counts: AutoscaleProtectionCounts::new(0, 0),
         }
+    }
+
+    fn with_ready_queue_capacity(mut self, ready_queue_capacity: u64) -> Self {
+        self.ready_queue_capacity = ready_queue_capacity;
+        self
     }
 
     fn ready_queue_outcomes(self) -> ReadyQueueOutcomes {
@@ -5408,20 +6080,32 @@ impl LiveAutoscaleHarnessObservation {
     }
 
     fn ready_queue_budget(self) -> AutoscaleResourceBudget {
-        let ready_hits = self.ready_queue_outcomes.ready_hits();
-        let cpus = ready_hits
+        let cpus = self
+            .ready_queue_capacity
             .try_into()
             .unwrap_or(u32::MAX)
             .saturating_mul(Self::PRODUCT_POD_CPU_SLOTS);
         AutoscaleResourceBudget::new(
             cpus,
-            Size::bytes(ready_hits.saturating_mul(Self::PRODUCT_POD_MEMORY_BYTES)),
-            Size::bytes(ready_hits.saturating_mul(PYTHON_PRODUCT_POD_STORE_BYTES)),
+            Size::bytes(
+                self.ready_queue_capacity
+                    .saturating_mul(Self::PRODUCT_POD_MEMORY_BYTES),
+            ),
+            Size::bytes(
+                self.ready_queue_capacity
+                    .saturating_mul(PYTHON_PRODUCT_POD_STORE_BYTES),
+            ),
         )
     }
 
-    fn protection_counts(self) -> AutoscaleProtectionCounts {
-        self.protection_counts
+    fn safe_spare_cpu_slots(self) -> u32 {
+        host_logical_cpu_count()
+            .saturating_sub(self.active_budget().cpus())
+            .max(1)
+    }
+
+    fn snappy_ready_queue_capacity_target(self) -> usize {
+        ((f64::from(self.safe_spare_cpu_slots()) * 0.70).ceil() as usize).max(1)
     }
 }
 
@@ -5439,6 +6123,7 @@ async fn collect_live_agent_computer_scorecard_evidence() -> LiveAgentComputerSc
         firkin_single_node::LogStore::default(),
         &snapshot_dir,
     );
+    let control_driver = driver.clone();
     let mut backend = LocalRuntimeBackend::new(driver, "2026-05-06T12:00:00Z");
     backend
         .create_pod(PodCreateRequest {
@@ -5506,34 +6191,26 @@ async fn collect_live_agent_computer_scorecard_evidence() -> LiveAgentComputerSc
         ));
     evidence.traces.push(ready_event_trace);
 
-    let mut resume_trace = agent_computer_event_trace(LifecycleClass::Resumed);
-    resume_trace.record(SandboxEventName::AgentComputerResumed);
+    let resume_slot = "agent-computer-scorecard-resume";
     backend
         .add_pod_container(
             &pod_id,
-            ready_deck_agent_container("agent-computer-scorecard-resume"),
+            ready_deck_prestarted_agent_slot_container(resume_slot),
         )
         .await
-        .expect("add agent-computer scorecard resume agent");
-    resume_trace.record(SandboxEventName::AgentComputerSandboxCreated);
-    resume_trace.record(SandboxEventName::AgentComputerProbeStart);
-    let resume_output = backend
-        .wait_pod_container(&pod_id, "agent-computer-scorecard-resume")
-        .await
-        .expect("wait agent-computer scorecard resume agent");
-    assert_eq!(
-        resume_output.exit_code,
-        0,
-        "agent-computer scorecard resume agent failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&resume_output.stdout),
-        String::from_utf8_lossy(&resume_output.stderr)
-    );
-    assert_eq!(resume_output.stdout, b"agent-ready");
+        .expect("add agent-computer scorecard resume slot");
+    validate_prestarted_agent_slots(&mut backend, &pod_id, &[resume_slot.to_owned()]).await;
+
+    let mut resume_trace = agent_computer_event_trace(LifecycleClass::Resumed);
+    resume_trace.record(SandboxEventName::AgentComputerResumed);
+    dispatch_ready_deck_prestarted_agent_slot(
+        &control_driver,
+        &pod_id,
+        resume_slot,
+        &mut resume_trace,
+    )
+    .await;
     evidence.ready_queue_hits += 1;
-    resume_trace.record(SandboxEventName::CliFirstUsefulStdout);
-    resume_trace.record(SandboxEventName::DatabaseReady);
-    resume_trace.record(SandboxEventName::BrowserReady);
-    resume_trace.record(SandboxEventName::AgentComputerReady);
     let resume_event_trace = resume_trace.finish();
     evidence
         .samples
@@ -5568,6 +6245,14 @@ fn agent_computer_event_trace(lifecycle: LifecycleClass) -> EventTraceRecorder {
     EventTraceRecorder::new(
         lifecycle,
         WorkloadClass::AgentComputer,
+        RuntimeProfile::BrowserDbCli,
+    )
+}
+
+fn agent_computer_density_event_trace(lifecycle: LifecycleClass) -> EventTraceRecorder {
+    EventTraceRecorder::new(
+        lifecycle,
+        WorkloadClass::ConcurrentCreate,
         RuntimeProfile::BrowserDbCli,
     )
 }
@@ -6054,6 +6739,7 @@ async fn collect_live_product_pod_ready_deck_samples(
         firkin_single_node::LogStore::default(),
         &snapshot_dir,
     );
+    let control_driver = driver.clone();
     let mut backend = LocalRuntimeBackend::new(driver, "2026-05-06T12:00:00Z");
     backend
         .create_pod(PodCreateRequest {
@@ -6082,35 +6768,27 @@ async fn collect_live_product_pod_ready_deck_samples(
         .expect("create ready-deck product pod");
 
     validate_ready_deck(&mut backend, &pod_id).await;
+    let slot_names = (0..repeats)
+        .map(|repeat| format!("agent-{repeat}"))
+        .collect::<Vec<_>>();
+    for slot_name in &slot_names {
+        backend
+            .add_pod_container(
+                &pod_id,
+                ready_deck_prestarted_agent_slot_container(slot_name),
+            )
+            .await
+            .expect("add ready-deck prestarted agent slot");
+    }
+    validate_prestarted_agent_slots(&mut backend, &pod_id, &slot_names).await;
 
     let mut samples = Vec::with_capacity(repeats);
     let mut traces = Vec::with_capacity(repeats);
-    for repeat in 0..repeats {
-        let agent_name = format!("agent-{repeat}");
+    for slot_name in slot_names {
         let mut trace = agent_computer_event_trace(LifecycleClass::Resumed);
         trace.record(SandboxEventName::AgentComputerResumed);
-        backend
-            .add_pod_container(&pod_id, ready_deck_agent_container(&agent_name))
-            .await
-            .expect("add ready-deck agent probe");
-        trace.record(SandboxEventName::AgentComputerSandboxCreated);
-        trace.record(SandboxEventName::AgentComputerProbeStart);
-        let agent_output = backend
-            .wait_pod_container(&pod_id, &agent_name)
-            .await
-            .expect("wait ready-deck agent probe");
-        assert_eq!(
-            agent_output.exit_code,
-            0,
-            "ready-deck agent probe failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&agent_output.stdout),
-            String::from_utf8_lossy(&agent_output.stderr)
-        );
-        assert_eq!(agent_output.stdout, b"agent-ready");
-        trace.record(SandboxEventName::CliFirstUsefulStdout);
-        trace.record(SandboxEventName::DatabaseReady);
-        trace.record(SandboxEventName::BrowserReady);
-        trace.record(SandboxEventName::AgentComputerReady);
+        dispatch_ready_deck_prestarted_agent_slot(&control_driver, &pod_id, &slot_name, &mut trace)
+            .await;
         let event_trace = trace.finish();
         samples.push(real_product_pod_ready_deck_sample(&event_trace));
         traces.push(event_trace);
@@ -6139,6 +6817,7 @@ async fn collect_live_product_pod_ready_deck_density_samples(
         firkin_single_node::LogStore::default(),
         &snapshot_dir,
     );
+    let metrics_driver = driver.clone();
     let mut backend = LocalRuntimeBackend::new(driver, "2026-05-06T12:00:00Z");
     backend
         .create_pod(PodCreateRequest {
@@ -6168,7 +6847,7 @@ async fn collect_live_product_pod_ready_deck_density_samples(
     validate_ready_deck(&mut backend, &pod_id).await;
 
     let mut points = Vec::with_capacity(concurrency_levels.len());
-    let mut samples = Vec::with_capacity(concurrency_levels.len() + 1);
+    let mut samples = Vec::with_capacity((concurrency_levels.len() * 3) + 2);
     let mut traces = Vec::new();
     let level_tag = density_level_tag(concurrency_levels);
     for &concurrency in concurrency_levels {
@@ -6176,13 +6855,17 @@ async fn collect_live_product_pod_ready_deck_density_samples(
             concurrency > 0,
             "ready-deck density concurrency must be positive"
         );
+        let phase_sample_offset = metrics_driver
+            .pod_container_add_benchmark_samples()
+            .await
+            .len();
         let mut futures = Vec::with_capacity(concurrency);
         for index in 0..concurrency {
             let mut backend = backend.clone();
             let pod_id = pod_id.clone();
             let agent_name = format!("density-c{concurrency}-{index}");
             futures.push(async move {
-                let mut trace = agent_computer_event_trace(LifecycleClass::Resumed);
+                let mut trace = agent_computer_density_event_trace(LifecycleClass::Resumed);
                 trace.record(SandboxEventName::AgentComputerResumed);
                 backend
                     .add_pod_container(&pod_id, ready_deck_agent_container(&agent_name))
@@ -6224,16 +6907,64 @@ async fn collect_live_product_pod_ready_deck_density_samples(
             })
             .max_by(f64::total_cmp)
             .expect("density level has traces");
+        let container_add_p95_latency_ms = level_traces
+            .iter()
+            .map(|trace| {
+                trace
+                    .duration_between(
+                        SandboxEventName::AgentComputerResumed,
+                        SandboxEventName::AgentComputerSandboxCreated,
+                    )
+                    .expect("ready-deck density container-add trace duration")
+                    .as_secs_f64()
+                    * 1000.0
+            })
+            .max_by(f64::total_cmp)
+            .expect("density level has container-add traces");
+        let output_wait_p95_latency_ms = level_traces
+            .iter()
+            .map(|trace| {
+                trace
+                    .duration_between(
+                        SandboxEventName::AgentComputerSandboxCreated,
+                        SandboxEventName::AgentComputerReady,
+                    )
+                    .expect("ready-deck density output-wait trace duration")
+                    .as_secs_f64()
+                    * 1000.0
+            })
+            .max_by(f64::total_cmp)
+            .expect("density level has output-wait traces");
         points.push(DensityP95Point::new(concurrency as u64, p95_latency_ms));
         samples.push(product_pod_ready_deck_density_level_sample(
             concurrency,
             &level_tag,
             p95_latency_ms,
         ));
+        samples.push(product_pod_ready_deck_container_add_level_sample(
+            concurrency,
+            &level_tag,
+            container_add_p95_latency_ms,
+        ));
+        samples.push(product_pod_ready_deck_output_wait_level_sample(
+            concurrency,
+            &level_tag,
+            output_wait_p95_latency_ms,
+        ));
+        let phase_samples = metrics_driver.pod_container_add_benchmark_samples().await;
+        samples.extend(product_pod_ready_deck_add_phase_level_samples(
+            concurrency,
+            &level_tag,
+            &phase_samples[phase_sample_offset..],
+        ));
         traces.extend(level_traces);
     }
+    samples.extend(product_pod_ready_deck_degradation_samples(
+        &points, &level_tag,
+    ));
 
-    let limit = max_active_before_p95_doubles(points).expect("ready-deck density breakpoint");
+    let limit = max_active_before_p95_doubles(points.iter().copied())
+        .expect("ready-deck density breakpoint");
     let sample = limit
         .into_agent_computer_sample()
         .with_static_tag("probe_surface", "browser_db_cli_readiness")
@@ -6335,40 +7066,26 @@ async fn collect_live_product_pod_prestarted_agent_slot_density_samples(
         }
         validate_prestarted_agent_slots(&mut backend, &pod_id, &slot_names).await;
 
+        let mut trace_recorders = slot_names
+            .iter()
+            .map(|_| {
+                let mut trace = agent_computer_density_event_trace(LifecycleClass::Resumed);
+                trace.record(SandboxEventName::AgentComputerResumed);
+                trace
+            })
+            .collect::<Vec<_>>();
+        signal_ready_deck_prestarted_agent_slots(&control_driver, &pod_id, concurrency).await;
+        for trace in &mut trace_recorders {
+            trace.record(SandboxEventName::AgentComputerSandboxCreated);
+            trace.record(SandboxEventName::AgentComputerProbeStart);
+        }
         let mut futures = Vec::with_capacity(concurrency);
-        for slot_name in slot_names {
+        for (slot_name, mut trace) in slot_names.into_iter().zip(trace_recorders) {
             let driver = control_driver.clone();
             let pod_id = pod_id.clone();
             futures.push(async move {
-                let mut trace = agent_computer_event_trace(LifecycleClass::Resumed);
-                trace.record(SandboxEventName::AgentComputerResumed);
-                driver
-                    .write_pod_empty_dir_file(
-                        &pod_id,
-                        "db",
-                        &format!("requests/{slot_name}"),
-                        b"go".to_vec(),
-                    )
-                    .await
-                    .expect("dispatch prestarted agent slot");
-                trace.record(SandboxEventName::AgentComputerSandboxCreated);
-                trace.record(SandboxEventName::AgentComputerProbeStart);
-                let agent_output = driver
-                    .wait_pod_container(&pod_id, &slot_name)
-                    .await
-                    .expect("wait prestarted agent slot");
-                assert_eq!(
-                    agent_output.exit_code,
-                    0,
-                    "prestarted agent slot failed: stdout={} stderr={}",
-                    String::from_utf8_lossy(&agent_output.stdout),
-                    String::from_utf8_lossy(&agent_output.stderr)
-                );
-                assert_eq!(agent_output.stdout, b"agent-slot-ready");
-                trace.record(SandboxEventName::CliFirstUsefulStdout);
-                trace.record(SandboxEventName::DatabaseReady);
-                trace.record(SandboxEventName::BrowserReady);
-                trace.record(SandboxEventName::AgentComputerReady);
+                wait_ready_deck_prestarted_agent_slot(&driver, &pod_id, &slot_name, &mut trace)
+                    .await;
                 trace.finish()
             });
         }
@@ -6387,11 +7104,30 @@ async fn collect_live_product_pod_prestarted_agent_slot_density_samples(
             })
             .max_by(f64::total_cmp)
             .expect("prestarted agent-slot density level has traces");
+        let output_wait_p95_latency_ms = level_traces
+            .iter()
+            .map(|trace| {
+                trace
+                    .duration_between(
+                        SandboxEventName::AgentComputerSandboxCreated,
+                        SandboxEventName::AgentComputerReady,
+                    )
+                    .expect("prestarted agent-slot output wait trace duration")
+                    .as_secs_f64()
+                    * 1000.0
+            })
+            .max_by(f64::total_cmp)
+            .expect("prestarted agent-slot output wait level has traces");
         points.push(DensityP95Point::new(concurrency as u64, p95_latency_ms));
         samples.push(prestarted_agent_slot_density_level_sample(
             concurrency,
             &level_tag,
             p95_latency_ms,
+        ));
+        samples.push(prestarted_agent_slot_output_wait_level_sample(
+            concurrency,
+            &level_tag,
+            output_wait_p95_latency_ms,
         ));
         traces.extend(level_traces);
     }
@@ -6440,12 +7176,78 @@ async fn collect_live_product_pod_prestarted_agent_slot_density_samples(
     (samples, traces)
 }
 
+async fn collect_live_autoscale_ready_queue_capacity(target_slots: usize) -> u64 {
+    assert!(
+        target_slots > 0,
+        "autoscale ready queue capacity requires at least one prestarted slot"
+    );
+    let temp = tempfile::tempdir().expect("autoscale ready queue capacity tempdir");
+    let snapshot_dir = temp.path().join("snapshots");
+    let pod_id = format!(
+        "live-autoscale-ready-queue-{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let driver = firkin_single_node::AppleVzLocalRuntimeDriver::with_snapshot_dir(
+        "python:3.12-slim",
+        firkin_single_node::PortRegistry::default(),
+        firkin_single_node::LogStore::default(),
+        &snapshot_dir,
+    );
+    let mut backend = LocalRuntimeBackend::new(driver, "2026-05-06T12:00:00Z");
+    backend
+        .create_pod(PodCreateRequest {
+            pod_id: Some(pod_id.clone()),
+            timeout: Some(300),
+            metadata: BTreeMap::from([(
+                "benchmark".to_owned(),
+                "autoscale-ready-queue-capacity".to_owned(),
+            )]),
+            empty_dirs: vec![
+                PodEmptyDir {
+                    name: "db".to_owned(),
+                },
+                PodEmptyDir {
+                    name: "browser".to_owned(),
+                },
+            ],
+            pod_store: PodStoreOptions {
+                size_bytes: PYTHON_PRODUCT_POD_STORE_BYTES,
+                trim_policy: PodTrimPolicy::Manual,
+                ..PodStoreOptions::default()
+            },
+            containers: ready_deck_sidecar_containers(),
+        })
+        .await
+        .expect("create autoscale ready queue capacity product pod");
+    validate_ready_deck(&mut backend, &pod_id).await;
+
+    let slot_names = (0..target_slots)
+        .map(|index| format!("autoscale-ready-slot-{index}"))
+        .collect::<Vec<_>>();
+    for slot_name in &slot_names {
+        backend
+            .add_pod_container(
+                &pod_id,
+                ready_deck_prestarted_agent_slot_container(slot_name),
+            )
+            .await
+            .expect("add autoscale ready queue prestarted slot");
+    }
+    validate_prestarted_agent_slots(&mut backend, &pod_id, &slot_names).await;
+
+    backend
+        .delete_pod(&pod_id)
+        .await
+        .expect("delete autoscale ready queue capacity pod");
+    slot_names.len().try_into().unwrap_or(u64::MAX)
+}
+
 fn product_pod_ready_deck_density_level_sample(
     concurrency: usize,
     concurrency_levels: &str,
     p95_latency_ms: f64,
 ) -> BenchmarkSample {
-    BenchmarkSample::new(
+    let mut sample = BenchmarkSample::new(
         format!("debug.product.agent_computer_ready_deck_c{concurrency}_ms"),
         BenchmarkMetricKind::LifecycleLatency,
         BenchmarkUnit::Milliseconds,
@@ -6460,7 +7262,178 @@ fn product_pod_ready_deck_density_level_sample(
     .with_static_tag("excludes_container_add", "false")
     .with_static_tag("ready_signal", "agent_computer_ready_after_container_add")
     .with_dynamic_tag("concurrency_level", concurrency.to_string())
+    .with_dynamic_tag("concurrency_levels", concurrency_levels);
+    if let Some((tier, max_ready_ms)) = product_density_capacity_tier(concurrency as u64) {
+        sample = sample
+            .with_static_tag("density_tier", tier)
+            .with_dynamic_tag("capacity_max_ready_ms", format!("{max_ready_ms:.6}"))
+            .with_static_tag(
+                "capacity_status",
+                if p95_latency_ms <= max_ready_ms {
+                    "pass"
+                } else {
+                    "miss"
+                },
+            );
+    } else {
+        sample = sample.with_static_tag("capacity_status", "observed_no_tier");
+    }
+    sample
+}
+
+fn product_pod_ready_deck_degradation_samples(
+    points: &[DensityP95Point],
+    concurrency_levels: &str,
+) -> Vec<BenchmarkSample> {
+    let Some(baseline) = points
+        .iter()
+        .find(|point| point.concurrency() == 1)
+        .map(|point| point.p95_latency_ms())
+    else {
+        return Vec::new();
+    };
+    points
+        .iter()
+        .map(|point| {
+            let concurrency = point.concurrency();
+            let ratio = point.p95_latency_ms() / baseline;
+            BenchmarkSample::new(
+                format!(
+                    "debug.product.agent_computer_ready_deck_p95_degradation_c{concurrency}_ratio"
+                ),
+                BenchmarkMetricKind::WorkloadResource,
+                BenchmarkUnit::Ratio,
+                ratio,
+            )
+            .with_static_tag("probe_surface", "browser_db_cli_readiness")
+            .with_static_tag("measurement_boundary", "product_path_density_degradation")
+            .with_static_tag("cli_boundary", "real_cli")
+            .with_static_tag("browser_boundary", "real_browser_sidecar")
+            .with_static_tag("database_boundary", "real_db_sidecar")
+            .with_static_tag("pod_surface", "product_pod_ready_deck")
+            .with_static_tag("excludes_container_add", "false")
+            .with_static_tag("ready_signal", "agent_computer_ready_after_container_add")
+            .with_dynamic_tag("concurrency_level", concurrency.to_string())
+            .with_dynamic_tag("concurrency_levels", concurrency_levels)
+            .with_dynamic_tag("baseline_p95_ms", format!("{baseline:.6}"))
+            .with_dynamic_tag("level_p95_ms", format!("{:.6}", point.p95_latency_ms()))
+            .with_static_tag("degradation_status", "diagnostic_only")
+        })
+        .collect()
+}
+
+fn product_density_capacity_tier(concurrency: u64) -> Option<(&'static str, f64)> {
+    match concurrency {
+        4 => Some(("snappy_4", 125.0)),
+        8 => Some(("snappy_8", 250.0)),
+        16 => Some(("degraded_16", 500.0)),
+        _ => None,
+    }
+}
+
+fn product_pod_ready_deck_container_add_level_sample(
+    concurrency: usize,
+    concurrency_levels: &str,
+    p95_latency_ms: f64,
+) -> BenchmarkSample {
+    BenchmarkSample::new(
+        format!("debug.product.agent_computer_container_add_c{concurrency}_ms"),
+        BenchmarkMetricKind::LifecycleLatency,
+        BenchmarkUnit::Milliseconds,
+        p95_latency_ms,
+    )
+    .with_static_tag("probe_surface", "browser_db_cli_readiness")
+    .with_static_tag("measurement_boundary", "product_path_container_add")
+    .with_static_tag("phase", "pod_container_add")
+    .with_static_tag("cli_boundary", "real_cli")
+    .with_static_tag("browser_boundary", "real_browser_sidecar")
+    .with_static_tag("database_boundary", "real_db_sidecar")
+    .with_static_tag("pod_surface", "product_pod_ready_deck")
+    .with_static_tag("excludes_container_add", "false")
+    .with_static_tag("ready_signal", "container_added_before_agent_output")
+    .with_dynamic_tag("concurrency_level", concurrency.to_string())
     .with_dynamic_tag("concurrency_levels", concurrency_levels)
+}
+
+fn product_pod_ready_deck_output_wait_level_sample(
+    concurrency: usize,
+    concurrency_levels: &str,
+    p95_latency_ms: f64,
+) -> BenchmarkSample {
+    BenchmarkSample::new(
+        format!("debug.product.agent_computer_output_wait_c{concurrency}_ms"),
+        BenchmarkMetricKind::LifecycleLatency,
+        BenchmarkUnit::Milliseconds,
+        p95_latency_ms,
+    )
+    .with_static_tag("probe_surface", "browser_db_cli_readiness")
+    .with_static_tag("measurement_boundary", "product_path_output_wait")
+    .with_static_tag("phase", "agent_output_after_container_add")
+    .with_static_tag("cli_boundary", "real_cli")
+    .with_static_tag("browser_boundary", "real_browser_sidecar")
+    .with_static_tag("database_boundary", "real_db_sidecar")
+    .with_static_tag("pod_surface", "product_pod_ready_deck")
+    .with_static_tag("excludes_container_add", "false")
+    .with_static_tag("ready_signal", "agent_computer_ready_after_container_add")
+    .with_dynamic_tag("concurrency_level", concurrency.to_string())
+    .with_dynamic_tag("concurrency_levels", concurrency_levels)
+}
+
+fn product_pod_ready_deck_add_phase_level_samples(
+    concurrency: usize,
+    concurrency_levels: &str,
+    raw_samples: &[BenchmarkSample],
+) -> Vec<BenchmarkSample> {
+    const PHASES: [(&str, &str); 17] = [
+        ("template_lookup", "template_lookup"),
+        ("spec_build", "spec_build"),
+        ("begin", "begin_container_add"),
+        ("prepare", "prepare_overlay"),
+        ("start", "start_container"),
+        ("start_spec_build", "start_spec_build"),
+        ("start_vminitd_connect", "start_vminitd_connect"),
+        ("start_socket_relays", "start_socket_relays"),
+        ("start_stdio_prepare", "start_stdio_prepare"),
+        ("start_config_write_rpc", "start_config_write_rpc"),
+        ("start_request_encode", "start_request_encode"),
+        ("start_create_process_rpc", "start_create_process_rpc"),
+        ("start_gate_wait", "start_gate_wait"),
+        ("start_process_rpc", "start_process_rpc"),
+        ("start_total", "start_total"),
+        ("commit", "commit_container_add"),
+        ("total", "total"),
+    ];
+    PHASES
+        .into_iter()
+        .filter_map(|(raw_phase, metric_phase)| {
+            let p95_latency_ms = raw_samples
+                .iter()
+                .filter(|sample| sample.tag_value("phase") == Some(raw_phase))
+                .map(BenchmarkSample::value)
+                .max_by(f64::total_cmp)?;
+            Some(
+                BenchmarkSample::new(
+                    format!(
+                        "debug.product.agent_computer_pod_add_{metric_phase}_c{concurrency}_ms"
+                    ),
+                    BenchmarkMetricKind::LifecycleLatency,
+                    BenchmarkUnit::Milliseconds,
+                    p95_latency_ms,
+                )
+                .with_static_tag("probe_surface", "browser_db_cli_readiness")
+                .with_static_tag("measurement_boundary", "product_path_pod_add_phase")
+                .with_static_tag("phase", metric_phase)
+                .with_static_tag("cli_boundary", "real_cli")
+                .with_static_tag("browser_boundary", "real_browser_sidecar")
+                .with_static_tag("database_boundary", "real_db_sidecar")
+                .with_static_tag("pod_surface", "product_pod_ready_deck")
+                .with_static_tag("excludes_container_add", "false")
+                .with_static_tag("source_boundary", "single_node_pod_container_add")
+                .with_dynamic_tag("concurrency_level", concurrency.to_string())
+                .with_dynamic_tag("concurrency_levels", concurrency_levels),
+            )
+        })
+        .collect()
 }
 
 fn prestarted_agent_slot_density_level_sample(
@@ -6476,6 +7449,7 @@ fn prestarted_agent_slot_density_level_sample(
     )
     .with_static_tag("probe_surface", "browser_db_cli_readiness")
     .with_static_tag("measurement_boundary", "prestarted_slot_density_level")
+    .with_static_tag("phase", "host_control_file_write")
     .with_static_tag("cli_boundary", "real_cli")
     .with_static_tag("browser_boundary", "real_browser_sidecar")
     .with_static_tag("database_boundary", "real_db_sidecar")
@@ -6484,6 +7458,32 @@ fn prestarted_agent_slot_density_level_sample(
     .with_static_tag("excludes_container_add", "true")
     .with_static_tag("ready_signal", "request_fifo_acceptance")
     .with_static_tag("output_wait_preserved", "true")
+    .with_dynamic_tag("concurrency_level", concurrency.to_string())
+    .with_dynamic_tag("concurrency_levels", concurrency_levels)
+}
+
+fn prestarted_agent_slot_output_wait_level_sample(
+    concurrency: usize,
+    concurrency_levels: &str,
+    p95_latency_ms: f64,
+) -> BenchmarkSample {
+    BenchmarkSample::new(
+        format!("debug.product.prestarted_agent_slot_output_wait_c{concurrency}_ms"),
+        BenchmarkMetricKind::LifecycleLatency,
+        BenchmarkUnit::Milliseconds,
+        p95_latency_ms,
+    )
+    .with_static_tag("probe_surface", "browser_db_cli_readiness")
+    .with_static_tag("measurement_boundary", "prestarted_slot_output_wait")
+    .with_static_tag("phase", "slot_process_completion_after_acceptance")
+    .with_static_tag("cli_boundary", "real_cli")
+    .with_static_tag("browser_boundary", "real_browser_sidecar")
+    .with_static_tag("database_boundary", "real_db_sidecar")
+    .with_static_tag("pod_surface", "product_pod_ready_deck")
+    .with_static_tag("slot_surface", "prestarted_agent_slot")
+    .with_static_tag("excludes_container_add", "true")
+    .with_static_tag("ready_signal", "agent_slot_ready_after_fifo_acceptance")
+    .with_static_tag("checkout_wait_preserved", "true")
     .with_dynamic_tag("concurrency_level", concurrency.to_string())
     .with_dynamic_tag("concurrency_levels", concurrency_levels)
 }
@@ -6560,6 +7560,70 @@ async fn validate_prestarted_agent_slots(
         String::from_utf8_lossy(&validator_output.stderr)
     );
     assert_eq!(validator_output.stdout, b"slots-ready");
+}
+
+async fn dispatch_ready_deck_prestarted_agent_slot(
+    driver: &firkin_single_node::AppleVzLocalRuntimeDriver,
+    pod_id: &str,
+    slot_name: &str,
+    trace: &mut EventTraceRecorder,
+) {
+    signal_ready_deck_prestarted_agent_slot(driver, pod_id, slot_name).await;
+    trace.record(SandboxEventName::AgentComputerSandboxCreated);
+    trace.record(SandboxEventName::AgentComputerProbeStart);
+    wait_ready_deck_prestarted_agent_slot(driver, pod_id, slot_name, trace).await;
+}
+
+async fn signal_ready_deck_prestarted_agent_slot(
+    driver: &firkin_single_node::AppleVzLocalRuntimeDriver,
+    pod_id: &str,
+    slot_name: &str,
+) {
+    driver
+        .write_pod_empty_dir_file(
+            pod_id,
+            "db",
+            &format!("requests/{slot_name}"),
+            b"go\n".to_vec(),
+        )
+        .await
+        .expect("dispatch named prestarted agent slot");
+}
+
+async fn signal_ready_deck_prestarted_agent_slots(
+    driver: &firkin_single_node::AppleVzLocalRuntimeDriver,
+    pod_id: &str,
+    request_count: usize,
+) {
+    let request_payload = "go\n".repeat(request_count).into_bytes();
+    driver
+        .write_pod_empty_dir_file(pod_id, "db", "requests/agent-slot-queue", request_payload)
+        .await
+        .expect("dispatch prestarted agent slot");
+}
+
+async fn wait_ready_deck_prestarted_agent_slot(
+    driver: &firkin_single_node::AppleVzLocalRuntimeDriver,
+    pod_id: &str,
+    slot_name: &str,
+    trace: &mut EventTraceRecorder,
+) {
+    let output = driver
+        .wait_pod_container(pod_id, slot_name)
+        .await
+        .expect("wait prestarted agent slot");
+    assert_eq!(
+        output.exit_code,
+        0,
+        "prestarted agent slot failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"agent-slot-ready");
+    trace.record(SandboxEventName::CliFirstUsefulStdout);
+    trace.record(SandboxEventName::DatabaseReady);
+    trace.record(SandboxEventName::BrowserReady);
+    trace.record(SandboxEventName::AgentComputerReady);
 }
 
 fn ready_deck_sidecar_containers() -> Vec<PodContainerCreateRequest> {
@@ -6673,6 +7737,9 @@ fn ready_deck_agent_probe_command() -> String {
 fn ready_deck_prestarted_agent_slot_command(slot_name: &str) -> String {
     format!(
         r#"slot={slot_name:?}
+queue=/db/requests/agent-slot-queue
+private="/db/requests/$slot"
+signal="/db/slots/$slot.go"
 i=0
 while [ "$i" -lt 600 ]; do
   browser="$(cat /browser/heartbeat 2>/dev/null || true)"
@@ -6680,8 +7747,11 @@ while [ "$i" -lt 600 ]; do
   if [ "$browser" = "browser-ready" ] && [ "$db" = "db-ready" ]; then
     mkdir -p /db/slots
     mkdir -p /db/requests
-    rm -f "/db/requests/$slot"
-    mkfifo "/db/requests/$slot"
+    if [ ! -p "$queue" ]; then
+      mkfifo "$queue" 2>/dev/null || [ -p "$queue" ] || exit 1
+    fi
+    rm -f "$private"
+    mkfifo "$private"
     printf ready > "/db/slots/$slot.ready"
     break
   fi
@@ -6692,7 +7762,21 @@ if [ ! -f "/db/slots/$slot.ready" ]; then
   printf 'slot never reached ready-deck readiness' >&2
   exit 1
 fi
-IFS= read -r _ < "/db/requests/$slot"
+(
+  IFS= read -r _ < "$private"
+  printf go > "$signal"
+) &
+private_pid=$!
+(
+  IFS= read -r _ < "$queue"
+  printf go > "$signal"
+) &
+queue_pid=$!
+while [ ! -f "$signal" ]; do
+  sleep 0.001
+done
+kill "$private_pid" "$queue_pid" 2>/dev/null || true
+wait "$private_pid" "$queue_pid" 2>/dev/null || true
 printf 'agent-slot-ready'"#
     )
 }
@@ -6759,6 +7843,10 @@ fn real_product_pod_ready_deck_sample(trace: &SandboxEventTrace) -> BenchmarkSam
     .with_static_tag("browser_boundary", "real_browser_sidecar")
     .with_static_tag("database_boundary", "real_db_sidecar")
     .with_static_tag("pod_surface", "product_pod_ready_deck")
+    .with_static_tag("slot_surface", "prestarted_agent_slot")
+    .with_static_tag("excludes_container_add", "true")
+    .with_static_tag("ready_signal", "request_fifo_acceptance")
+    .with_static_tag("output_wait_preserved", "true")
 }
 
 fn retained_shell_density_sample(
@@ -6766,22 +7854,41 @@ fn retained_shell_density_sample(
     concurrency: usize,
     repeat: usize,
     repeat_count: usize,
-    latency_ms: f64,
+    observation: RetainedShellDispatchObservation,
 ) -> BenchmarkSample {
-    BenchmarkSample::new(
+    let mut sample = BenchmarkSample::new(
         metric,
         BenchmarkMetricKind::LifecycleLatency,
         BenchmarkUnit::Milliseconds,
-        latency_ms,
+        observation.first_stdout.as_secs_f64() * 1000.0,
     )
     .with_static_tag("measurement_boundary", "retained_shell_cli_density")
     .with_static_tag("shell_mode", "prestarted_stdin_reused")
+    .with_static_tag("warmup_dispatch", "excluded")
     .with_dynamic_tag("concurrency_level", concurrency.to_string())
     .with_dynamic_tag("repeat_index", repeat.to_string())
     .with_dynamic_tag("repeat_count", repeat_count.to_string())
+    .with_dynamic_tag("connect_polls_max", observation.connect_polls.to_string())
+    .with_dynamic_tag("dispatch_transport", observation.dispatch_transport)
+    .with_dynamic_tag(
+        "send_stdin_ms",
+        format!("{:.6}", observation.send_stdin.as_secs_f64() * 1000.0),
+    )
+    .with_dynamic_tag(
+        "output_wait_ms",
+        format!("{:.6}", observation.output_wait.as_secs_f64() * 1000.0),
+    );
+    if let Some(runtime_stdin_write_max) = observation.runtime_stdin_write_max {
+        sample = sample.with_dynamic_tag(
+            "runtime_stdin_write_max_ms",
+            format!("{:.6}", runtime_stdin_write_max.as_secs_f64() * 1000.0),
+        );
+    }
+    sample
 }
 
 async fn collect_retained_shell_density_reused_samples(
+    adapter: &firkin_runtime::FirkinRuntimeAdapter<ReadyLiveLauncher>,
     sandbox: &e2b_sdk::Sandbox,
     density_levels: &[usize],
     repeats: usize,
@@ -6789,42 +7896,344 @@ async fn collect_retained_shell_density_reused_samples(
     let density_level_tag = density_level_tag(density_levels);
     let mut samples = Vec::with_capacity(density_levels.len() * repeats);
     for concurrency in density_levels {
-        let mut shell_pids = Vec::with_capacity(*concurrency);
+        let mut shells = Vec::with_capacity(*concurrency);
         for _ in 0..*concurrency {
-            shell_pids.push(start_retained_eval_shell(sandbox).await);
+            shells.push(start_retained_eval_shell(sandbox).await);
         }
+        let warmups = join_all(shells.iter_mut().enumerate().map(|(index, shell)| {
+            let command = format!("printf retained-density-warmup-c{concurrency}-{index}");
+            async move { dispatch_retained_shell_first_stdout(sandbox, shell, &command).await }
+        }))
+        .await;
+        assert_eq!(warmups.len(), *concurrency);
         for repeat in 0..repeats {
-            let dispatches = join_all(shell_pids.iter().copied().enumerate().map(|(index, pid)| {
-                let command = format!("printf retained-density-c{concurrency}-r{repeat}-{index}");
-                async move { dispatch_retained_shell_first_stdout(sandbox, pid, &command).await }
-            }))
-            .await;
-            let latency = dispatches
+            let runtime_sample_offset = adapter.benchmark_samples().await.len();
+            let dispatches =
+                join_all(
+                    shells.iter_mut().enumerate().map(|(index, shell)| {
+                        let command =
+                            format!("printf retained-density-c{concurrency}-r{repeat}-{index}");
+                        async move {
+                            dispatch_retained_shell_first_stdout(sandbox, shell, &command).await
+                        }
+                    }),
+                )
+                .await;
+            let mut observation = dispatches
                 .into_iter()
-                .max()
+                .max_by_key(|observation| observation.first_stdout)
                 .unwrap_or_else(|| panic!("retained shell density c{concurrency} had no shells"));
+            observation.runtime_stdin_write_max =
+                runtime_stdin_write_max_since(adapter, runtime_sample_offset).await;
             samples.push(
                 retained_shell_density_sample(
                     format!("debug.exec.retained_shell_first_stdout_c{concurrency}_ms"),
                     *concurrency,
                     repeat,
                     repeats,
-                    latency.as_secs_f64() * 1000.0,
+                    observation,
                 )
                 .with_dynamic_tag("concurrency_levels", density_level_tag.clone()),
             );
         }
-        for pid in shell_pids {
+        for shell in shells {
             assert!(
                 sandbox
                     .commands()
-                    .kill(pid, e2b_sdk::CommandRequestOpts::default())
+                    .kill(shell.pid, e2b_sdk::CommandRequestOpts::default())
                     .await
                     .unwrap()
             );
         }
     }
     samples
+}
+
+async fn collect_retained_shell_send_path_samples(
+    sandbox: &e2b_sdk::Sandbox,
+    client: &reqwest::Client,
+    proxy_url: &str,
+    envd_url: &str,
+    repeats: usize,
+    density_levels: &[usize],
+) -> Vec<BenchmarkSample> {
+    let mut shell = start_retained_eval_shell(sandbox).await;
+    let warmup = format!("printf retained-send-path-warmup-{}", uuid::Uuid::new_v4());
+    let _ = dispatch_retained_shell_first_stdout(sandbox, &mut shell, &warmup).await;
+    let mut samples = Vec::with_capacity(repeats * 6 * (density_levels.len() + 1));
+    for repeat in 0..repeats {
+        let direct_command = format!("printf retained-send-direct-r{repeat}");
+        let direct = dispatch_retained_shell_first_stdout_with_send(
+            &mut shell,
+            &direct_command,
+            |pid, data| {
+                let client = client.clone();
+                let envd_url = envd_url.to_owned();
+                async move {
+                    timed_live_raw_envd_direct_send_input(&client, &envd_url, pid, data).await;
+                }
+            },
+        )
+        .await;
+        samples.extend(retained_shell_send_path_samples(
+            "direct_envd",
+            repeat,
+            repeats,
+            direct,
+        ));
+
+        let proxy_command = format!("printf retained-send-proxy-r{repeat}");
+        let proxy = dispatch_retained_shell_first_stdout_with_send(
+            &mut shell,
+            &proxy_command,
+            |pid, data| {
+                let client = client.clone();
+                let proxy_url = proxy_url.to_owned();
+                let sandbox_id = sandbox.sandbox_id().to_owned();
+                async move {
+                    timed_live_raw_envd_proxy_send_input(
+                        &client,
+                        &proxy_url,
+                        &sandbox_id,
+                        pid,
+                        data,
+                    )
+                    .await;
+                }
+            },
+        )
+        .await;
+        samples.extend(retained_shell_send_path_samples(
+            "domain_proxy",
+            repeat,
+            repeats,
+            proxy,
+        ));
+    }
+    assert!(
+        sandbox
+            .commands()
+            .kill(shell.pid, e2b_sdk::CommandRequestOpts::default())
+            .await
+            .unwrap()
+    );
+    samples.extend(
+        collect_retained_shell_send_path_fanout_samples(
+            sandbox,
+            client,
+            proxy_url,
+            envd_url,
+            repeats,
+            density_levels,
+        )
+        .await,
+    );
+    samples
+}
+
+async fn collect_retained_shell_send_path_fanout_samples(
+    sandbox: &e2b_sdk::Sandbox,
+    client: &reqwest::Client,
+    proxy_url: &str,
+    envd_url: &str,
+    repeats: usize,
+    density_levels: &[usize],
+) -> Vec<BenchmarkSample> {
+    let mut samples = Vec::with_capacity(repeats * density_levels.len() * 6);
+    for path in ["direct_envd", "domain_proxy"] {
+        for concurrency in density_levels {
+            let mut shells = Vec::with_capacity(*concurrency);
+            for _ in 0..*concurrency {
+                shells.push(start_retained_eval_shell(sandbox).await);
+            }
+            let warmups =
+                join_all(
+                    shells.iter_mut().enumerate().map(|(index, shell)| {
+                        let command =
+                            format!("printf retained-send-path-fanout-warmup-{path}-{index}");
+                        async move {
+                            dispatch_retained_shell_first_stdout(sandbox, shell, &command).await
+                        }
+                    }),
+                )
+                .await;
+            assert_eq!(warmups.len(), *concurrency);
+            for repeat in 0..repeats {
+                let dispatches = join_all(shells.iter_mut().enumerate().map(|(index, shell)| {
+                    let command = format!(
+                        "printf retained-send-path-fanout-{path}-c{concurrency}-r{repeat}-{index}"
+                    );
+                    async move {
+                        dispatch_retained_shell_first_stdout_for_raw_send_path(
+                            sandbox, client, proxy_url, envd_url, shell, &command, path,
+                        )
+                        .await
+                    }
+                }))
+                .await;
+                let observation = dispatches
+                    .into_iter()
+                    .max_by_key(|observation| observation.first_stdout)
+                    .unwrap_or_else(|| {
+                        panic!("retained shell send path c{concurrency} had no dispatches")
+                    });
+                samples.extend(retained_shell_send_path_fanout_samples(
+                    path,
+                    *concurrency,
+                    repeat,
+                    repeats,
+                    density_levels,
+                    observation,
+                ));
+            }
+            for shell in shells {
+                assert!(
+                    sandbox
+                        .commands()
+                        .kill(shell.pid, e2b_sdk::CommandRequestOpts::default())
+                        .await
+                        .unwrap()
+                );
+            }
+        }
+    }
+    samples
+}
+
+async fn dispatch_retained_shell_first_stdout_for_raw_send_path(
+    sandbox: &e2b_sdk::Sandbox,
+    client: &reqwest::Client,
+    proxy_url: &str,
+    envd_url: &str,
+    shell: &mut RetainedEvalShell,
+    command: &str,
+    path: &str,
+) -> RetainedShellSendPathObservation {
+    match path {
+        "direct_envd" => {
+            dispatch_retained_shell_first_stdout_with_send(shell, command, |pid, data| {
+                let client = client.clone();
+                let envd_url = envd_url.to_owned();
+                async move {
+                    timed_live_raw_envd_direct_send_input(&client, &envd_url, pid, data).await;
+                }
+            })
+            .await
+        }
+        "domain_proxy" => {
+            dispatch_retained_shell_first_stdout_with_send(shell, command, |pid, data| {
+                let client = client.clone();
+                let proxy_url = proxy_url.to_owned();
+                let sandbox_id = sandbox.sandbox_id().to_owned();
+                async move {
+                    timed_live_raw_envd_proxy_send_input(
+                        &client,
+                        &proxy_url,
+                        &sandbox_id,
+                        pid,
+                        data,
+                    )
+                    .await;
+                }
+            })
+            .await
+        }
+        _ => unreachable!("known retained shell raw send path"),
+    }
+}
+
+fn retained_shell_send_path_samples(
+    path: &'static str,
+    repeat: usize,
+    repeats: usize,
+    observation: RetainedShellSendPathObservation,
+) -> [BenchmarkSample; 3] {
+    [
+        retained_shell_send_path_sample(
+            format!("debug.exec.retained_shell_send_input_{path}_ms"),
+            path,
+            repeat,
+            repeats,
+            observation.send_input,
+        ),
+        retained_shell_send_path_sample(
+            format!("debug.exec.retained_shell_first_stdout_{path}_ms"),
+            path,
+            repeat,
+            repeats,
+            observation.first_stdout,
+        ),
+        retained_shell_send_path_sample(
+            format!("debug.exec.retained_shell_output_wait_{path}_ms"),
+            path,
+            repeat,
+            repeats,
+            observation.output_wait,
+        ),
+    ]
+}
+
+fn retained_shell_send_path_fanout_samples(
+    path: &str,
+    concurrency: usize,
+    repeat: usize,
+    repeats: usize,
+    density_levels: &[usize],
+    observation: RetainedShellSendPathObservation,
+) -> [BenchmarkSample; 3] {
+    let levels = density_level_tag(density_levels);
+    [
+        retained_shell_send_path_sample(
+            format!("debug.exec.retained_shell_send_input_{path}_c{concurrency}_ms"),
+            path,
+            repeat,
+            repeats,
+            observation.send_input,
+        )
+        .with_dynamic_tag("concurrency_level", concurrency.to_string())
+        .with_dynamic_tag("concurrency_levels", levels.clone()),
+        retained_shell_send_path_sample(
+            format!("debug.exec.retained_shell_first_stdout_{path}_c{concurrency}_ms"),
+            path,
+            repeat,
+            repeats,
+            observation.first_stdout,
+        )
+        .with_dynamic_tag("concurrency_level", concurrency.to_string())
+        .with_dynamic_tag("concurrency_levels", levels.clone()),
+        retained_shell_send_path_sample(
+            format!("debug.exec.retained_shell_output_wait_{path}_c{concurrency}_ms"),
+            path,
+            repeat,
+            repeats,
+            observation.output_wait,
+        )
+        .with_dynamic_tag("concurrency_level", concurrency.to_string())
+        .with_dynamic_tag("concurrency_levels", levels),
+    ]
+}
+
+fn retained_shell_send_path_sample(
+    metric: String,
+    path: impl Into<String>,
+    repeat: usize,
+    repeats: usize,
+    duration: Duration,
+) -> BenchmarkSample {
+    BenchmarkSample::new(
+        metric,
+        BenchmarkMetricKind::LifecycleLatency,
+        BenchmarkUnit::Milliseconds,
+        duration.as_secs_f64() * 1000.0,
+    )
+    .with_static_tag(
+        "measurement_boundary",
+        "retained_shell_send_path_attribution",
+    )
+    .with_static_tag("shell_mode", "prestarted_stdin_reused")
+    .with_dynamic_tag("send_path", path.into())
+    .with_dynamic_tag("repeat_index", repeat.to_string())
+    .with_dynamic_tag("repeat_count", repeats.to_string())
 }
 
 async fn collect_direct_exec_first_stdout_samples(
@@ -6848,7 +8257,12 @@ async fn collect_direct_exec_first_stdout_samples(
         .benchmark_samples()
         .await
         .into_iter()
-        .filter(|sample| sample.metric() == "debug.exec.direct_first_stdout_byte_ms")
+        .filter(|sample| {
+            matches!(
+                sample.metric(),
+                "exec.direct_command_start_ms" | "exec.direct_first_stdout_byte_ms"
+            )
+        })
         .filter(|sample| {
             sample
                 .tag_value("args")
@@ -6867,6 +8281,75 @@ async fn collect_direct_exec_first_stdout_samples(
         .enumerate()
         .map(|(repeat, sample)| sample.with_dynamic_tag("repeat_index", repeat.to_string()))
         .collect()
+}
+
+async fn collect_live_hot_to_first_stdout_samples(repeats: usize) -> Vec<BenchmarkSample> {
+    let rootfs = live_arm64_bash_rootfs().await;
+    let builder_id = "live-hot-to-first-stdout";
+    let (_temp, snapshot_path) = save_live_snapshot(rootfs.clone(), builder_id).await;
+    let adapter = live_envd_adapter(rootfs, builder_id);
+    let backend = live_backend_with_template(adapter.clone(), &snapshot_path);
+    let ready_templates = backend.templates().latest_prepared_templates();
+
+    let control_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_url = format!("http://{}", control_listener.local_addr().unwrap());
+    let control_plane = ControlPlaneHttpServer::new(backend);
+    let proxy =
+        DomainProxyHttpServer::from_control_plane(&control_plane, hostname!("cube.localhost"));
+    let control_task = tokio::spawn(control_plane.serve(control_listener));
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
+    let proxy_task = tokio::spawn(proxy.serve(proxy_listener));
+
+    let mut samples = Vec::with_capacity(repeats);
+    for repeat in 0..repeats {
+        let warm_targets = warm_template_targets_for_depth(ready_templates.clone(), 1);
+        FirkinWarmTemplateMaintainer::new(adapter.clone(), warm_targets, Duration::from_secs(1))
+            .run_cycle()
+            .await
+            .expect("prewarm hot-to-first-stdout target");
+
+        let trace_offset = adapter.benchmark_event_traces().await.len();
+        let sandbox_id = format!("sbx_firkin_hot_{repeat}");
+        let sandbox =
+            create_live_sdk_sandbox(live_sdk_config(&control_url, &proxy_url, &sandbox_id)).await;
+        let payload = format!("hot-proof-{repeat}");
+        let result = sandbox
+            .commands()
+            .run(
+                format!("printf {payload}"),
+                e2b_sdk::CommandRunOpts::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, payload);
+        assert!(sandbox.kill().await.unwrap());
+
+        let traces = adapter.benchmark_event_traces().await;
+        let mut repeat_samples = firkin_evidence::derive_available_contract_metric_samples(
+            traces.into_iter().skip(trace_offset),
+        )
+        .into_iter()
+        .filter(|sample| sample.metric() == "start.hot_to_first_stdout_ms")
+        .map(|sample| {
+            sample
+                .with_dynamic_tag("repeat_index", repeat.to_string())
+                .with_dynamic_tag("repeat_count", repeats.to_string())
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(
+            repeat_samples.len(),
+            1,
+            "expected one hot-to-first-stdout sample for repeat {repeat}"
+        );
+        samples.push(repeat_samples.remove(0));
+    }
+
+    proxy_task.abort();
+    control_task.abort();
+    samples
 }
 
 async fn collect_retained_shell_batch_100_sample(
@@ -7039,11 +8522,50 @@ fn write_live_retained_batch_artifact(
     .expect("write retained batch artifact");
 }
 
+fn write_live_raw_sample_artifact(artifact: &Path, kind: &str, samples: Vec<BenchmarkSample>) {
+    let mut metric_counts = HashMap::<String, usize>::new();
+    for sample in &samples {
+        *metric_counts.entry(sample.metric().to_owned()).or_default() += 1;
+    }
+    let samples = samples
+        .into_iter()
+        .map(|sample| {
+            let confidence =
+                PercentileAvailability::for_sample_count(metric_counts[sample.metric()]).as_str();
+            sample.with_static_tag("confidence", confidence)
+        })
+        .collect::<Vec<_>>();
+    let file = std::fs::File::create(artifact).expect("create raw live sample artifact");
+    serde_json::to_writer_pretty(
+        file,
+        &serde_json::json!({
+            "kind": kind,
+            "samples": samples,
+        }),
+    )
+    .expect("write raw live sample artifact");
+}
+
+fn tag_live_repeat_samples(
+    samples: Vec<BenchmarkSample>,
+    repeat: usize,
+    repeats: usize,
+) -> impl Iterator<Item = BenchmarkSample> {
+    samples.into_iter().map(move |sample| {
+        sample
+            .with_dynamic_tag("repeat_index", repeat.to_string())
+            .with_dynamic_tag("repeat_count", repeats.to_string())
+    })
+}
+
 fn write_live_retained_shell_density_artifact(
     artifact: &Path,
-    samples: Vec<BenchmarkSample>,
+    mut samples: Vec<BenchmarkSample>,
     traces: Vec<SandboxEventTrace>,
 ) {
+    if let Some(sample) = retained_shell_density_breakpoint_sample(&samples) {
+        samples.push(sample);
+    }
     let mut metric_counts = HashMap::<String, usize>::new();
     for sample in &samples {
         *metric_counts.entry(sample.metric().to_owned()).or_default() += 1;
@@ -7066,6 +8588,66 @@ fn write_live_retained_shell_density_artifact(
         }),
     )
     .expect("write retained shell density artifact");
+}
+
+fn retained_shell_density_breakpoint_sample(
+    samples: &[BenchmarkSample],
+) -> Option<BenchmarkSample> {
+    let mut samples_by_metric = BTreeMap::<&str, Vec<BenchmarkSample>>::new();
+    let mut concurrency_levels = None;
+    for sample in samples {
+        if !sample
+            .metric()
+            .starts_with("debug.exec.retained_shell_first_stdout_c")
+        {
+            continue;
+        }
+        concurrency_levels = concurrency_levels.or_else(|| {
+            sample
+                .tag_value("concurrency_levels")
+                .map(ToOwned::to_owned)
+        });
+        samples_by_metric
+            .entry(sample.metric())
+            .or_default()
+            .push(sample.clone());
+    }
+
+    let mut points = Vec::with_capacity(samples_by_metric.len());
+    let mut min_samples_per_level = usize::MAX;
+    for (metric, metric_samples) in samples_by_metric {
+        min_samples_per_level = min_samples_per_level.min(metric_samples.len());
+        let concurrency = metric_samples
+            .first()
+            .and_then(|sample| sample.tag_value("concurrency_level"))
+            .and_then(|value| value.parse::<u64>().ok())?;
+        let summary = BenchmarkSummary::from_samples(metric, metric_samples).ok()?;
+        points.push(DensityP95Point::new(concurrency, summary.p95()));
+    }
+
+    let fallback_concurrency_levels = points
+        .iter()
+        .map(|point| point.concurrency().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let density_limit = max_active_before_p95_doubles(points).ok()?;
+    let baseline_p95_latency_ms = density_limit.baseline_p95_latency_ms();
+    let threshold_p95_latency_ms = density_limit.threshold_p95_latency_ms();
+    let sample = density_limit
+        .into_retained_shell_sample()
+        .with_static_tag("measurement_boundary", "retained_shell_cli_density")
+        .with_static_tag("shell_mode", "prestarted_stdin_reused")
+        .with_dynamic_tag(
+            "concurrency_levels",
+            concurrency_levels.unwrap_or(fallback_concurrency_levels),
+        )
+        .with_dynamic_tag(
+            "underlying_samples_per_level_min",
+            min_samples_per_level.to_string(),
+        )
+        .with_dynamic_tag("baseline_p95_ms", format!("{baseline_p95_latency_ms:.6}"))
+        .with_dynamic_tag("threshold_p95_ms", format!("{threshold_p95_latency_ms:.6}"));
+    Some(sample)
 }
 
 fn write_live_direct_exec_first_stdout_artifact(artifact: &Path, samples: Vec<BenchmarkSample>) {
@@ -7124,9 +8706,6 @@ fn live_autoscale_harness_samples(
     samples.push(live_autoscale_ready_queue_sample(
         observation.ready_queue_outcomes(),
     ));
-    samples.extend(live_autoscale_protection_samples(
-        observation.protection_counts(),
-    ));
     samples
 }
 
@@ -7153,37 +8732,30 @@ fn live_autoscale_safe_spare_sample(
             "runtime_active_pod_registry_budget",
         )
         .with_static_tag("reserved_floor_source", "runtime_reserve_floor_config")
-        .with_static_tag("ready_queue_resource_source", "observed_ready_hit_budget")
+        .with_static_tag(
+            "ready_queue_resource_source",
+            "observed_ready_queue_capacity_budget",
+        )
         .with_static_tag(
             "resource_accounting_scope",
             "agent_computer_scorecard_harness_observation",
         )
+        .with_dynamic_tag(
+            "ready_queue_capacity",
+            observation.ready_queue_capacity.to_string(),
+        )
+        .with_dynamic_tag(
+            "ready_hits",
+            observation.ready_queue_outcomes.ready_hits().to_string(),
+        )
         .with_dynamic_tag("total_cpu_slots", total.cpus().to_string())
-        .with_dynamic_tag("total_memory_bytes", total.memory().as_bytes().to_string())
-        .with_dynamic_tag("total_disk_bytes", total.disk().as_bytes().to_string())
         .with_dynamic_tag("active_cpu_slots", active.cpus().to_string())
-        .with_dynamic_tag(
-            "active_memory_bytes",
-            active.memory().as_bytes().to_string(),
-        )
-        .with_dynamic_tag("active_disk_bytes", active.disk().as_bytes().to_string())
         .with_dynamic_tag("reserved_cpu_slots", reserved_floor.cpus().to_string())
-        .with_dynamic_tag(
-            "reserved_memory_bytes",
-            reserved_floor.memory().as_bytes().to_string(),
-        )
-        .with_dynamic_tag(
-            "reserved_disk_bytes",
-            reserved_floor.disk().as_bytes().to_string(),
-        )
         .with_dynamic_tag("ready_queue_cpu_slots", ready_queue.cpus().to_string())
+        .with_dynamic_tag("total_memory_bytes", total.memory().as_bytes().to_string())
         .with_dynamic_tag(
             "ready_queue_memory_bytes",
             ready_queue.memory().as_bytes().to_string(),
-        )
-        .with_dynamic_tag(
-            "ready_queue_disk_bytes",
-            ready_queue.disk().as_bytes().to_string(),
         )
 }
 
@@ -7251,13 +8823,19 @@ fn command_stdout_u64(program: &str, args: &[&str]) -> Option<u64> {
         .and_then(|stdout| stdout.trim().parse::<u64>().ok())
 }
 
-fn live_autoscale_pressure_scenario_samples() -> (Vec<BenchmarkSample>, Vec<SandboxEventTrace>) {
+async fn live_autoscale_pressure_scenario_samples() -> (Vec<BenchmarkSample>, Vec<SandboxEventTrace>)
+{
     let root = std::env::current_dir().expect("current dir for pressure scenario");
+    let refill_scenario = prepare_live_autoscale_ready_queue_refill().await;
+    let pressure_temp = tempfile::tempdir().expect("autoscale pressure tempdir");
+    let pressure_file = pressure_temp.path().join("reclaim-work.bin");
+    let reclaim_target_bytes = Size::mib(64).as_bytes();
+    write_reclaim_work_file(&pressure_file, reclaim_target_bytes);
     let mut probe = HostDiskPressureProbe::new();
-    let available = probe
+    let available_under_pressure = probe
         .available_disk(&root)
         .expect("runtime pressure scenario requires host disk probe");
-    let pressure_floor = available + Size::bytes(1);
+    let pressure_floor = available_under_pressure + Size::mib(32);
     let pressure_guard = RuntimeDiskPressureGuard::new(&root, pressure_floor);
     let pressure = pressure_guard
         .check(&mut probe)
@@ -7267,8 +8845,6 @@ fn live_autoscale_pressure_scenario_samples() -> (Vec<BenchmarkSample>, Vec<Sand
         "pressure scenario must be caused by host free-space floor"
     );
 
-    let normal_floor = Size::bytes(available.as_bytes().min(Size::gib(10).as_bytes()));
-    let normal_guard = RuntimeDiskPressureGuard::new(&root, normal_floor);
     let mut trace = EventTraceRecorder::new(
         LifecycleClass::Hot,
         WorkloadClass::AutoscaleScenario,
@@ -7277,19 +8853,17 @@ fn live_autoscale_pressure_scenario_samples() -> (Vec<BenchmarkSample>, Vec<Sand
     trace.record(SandboxEventName::PressureDetected);
     trace.record(SandboxEventName::AutoscaleDecisionMade);
     trace.record(SandboxEventName::AutoscaleActionStarted);
-    let restored = normal_guard
+    std::fs::remove_file(&pressure_file).expect("remove reclaim work file");
+    let restored = pressure_guard
         .check(&mut probe)
-        .expect("normal reserve floor must be restored after scoped pressure response");
+        .expect("reclaimed capacity must restore runtime pressure floor");
     assert!(
         restored.available_free() >= restored.minimum_free(),
-        "reserve-floor probe must satisfy runtime floor"
+        "reserve-floor probe must satisfy runtime floor after reclaim work"
     );
     trace.record(SandboxEventName::SafeFloorRestored);
-    let ready_probe = ReadyQueueOutcomes::new(1, 0)
-        .validate()
-        .expect("ready target probe must observe a ready hit");
-    let ready_outcomes = ready_probe.outcomes();
-    assert_eq!(ready_outcomes.ready_hits(), 1);
+    let ready_outcomes =
+        collect_live_autoscale_ready_queue_refill(refill_scenario, &mut trace).await;
     trace.record(SandboxEventName::ReadyTargetRestored);
 
     let trace = trace.finish();
@@ -7299,7 +8873,17 @@ fn live_autoscale_pressure_scenario_samples() -> (Vec<BenchmarkSample>, Vec<Sand
                 "pressure_floor_bytes",
                 pressure_floor.as_bytes().to_string(),
             )
-            .with_dynamic_tag("available_disk_bytes", available.as_bytes().to_string())
+            .with_static_tag("pressure_transition", "violated_to_satisfied")
+            .with_static_tag("autoscale_work_observed", "capacity_reclaimed")
+            .with_dynamic_tag("reclaim_work_bytes", reclaim_target_bytes.to_string())
+            .with_dynamic_tag(
+                "available_under_pressure_bytes",
+                available_under_pressure.as_bytes().to_string(),
+            )
+            .with_dynamic_tag(
+                "available_after_reclaim_bytes",
+                restored.available_free().as_bytes().to_string(),
+            )
             .with_dynamic_tag(
                 "restored_floor_bytes",
                 restored.minimum_free().as_bytes().to_string(),
@@ -7309,8 +8893,147 @@ fn live_autoscale_pressure_scenario_samples() -> (Vec<BenchmarkSample>, Vec<Sand
         ProductAutoscaleDurationMetric::PressureClearToReadyTarget,
     )
     .with_dynamic_tag("ready_target_hits", ready_outcomes.ready_hits().to_string())
-    .with_dynamic_tag("ready_target_misses", ready_outcomes.misses().to_string());
-    (vec![shrink, refill], vec![trace])
+    .with_dynamic_tag("ready_target_misses", ready_outcomes.misses().to_string())
+    .with_static_tag("ready_queue_transition", "drained_to_target")
+    .with_static_tag("autoscale_work_observed", "ready_capacity_refilled")
+    .with_static_tag("refill_setup_excluded", "true")
+    .with_static_tag("ready_queue_prepared_before_pressure_clear", "true")
+    .with_dynamic_tag(
+        "ready_target_drained_slots",
+        ready_outcomes.misses().to_string(),
+    )
+    .with_dynamic_tag(
+        "ready_target_refilled_slots",
+        ready_outcomes.ready_hits().to_string(),
+    );
+    let protection =
+        live_autoscale_pressure_stress_protection_samples(AutoscaleProtectionCounts::new(0, 0));
+    let mut samples = vec![shrink, refill];
+    samples.extend(protection);
+    (samples, vec![trace])
+}
+
+fn write_reclaim_work_file(path: &Path, bytes: u64) {
+    let mut file = std::fs::File::create(path).expect("create reclaim work file");
+    let chunk = vec![0xA5_u8; 1024 * 1024];
+    let mut remaining = bytes;
+    while remaining > 0 {
+        let write_len = usize::try_from(remaining.min(chunk.len() as u64))
+            .expect("reclaim work chunk length fits usize");
+        file.write_all(&chunk[..write_len])
+            .expect("write reclaim work bytes");
+        remaining -= write_len as u64;
+    }
+    file.sync_all().expect("sync reclaim work file");
+}
+
+struct LiveAutoscaleReadyQueueRefillScenario {
+    backend: LocalRuntimeBackend<firkin_single_node::AppleVzLocalRuntimeDriver>,
+    control_driver: firkin_single_node::AppleVzLocalRuntimeDriver,
+    pod_id: String,
+    drain_slots: Vec<String>,
+    _temp: tempfile::TempDir,
+}
+
+async fn prepare_live_autoscale_ready_queue_refill() -> LiveAutoscaleReadyQueueRefillScenario {
+    const READY_TARGET: usize = 2;
+    let temp = tempfile::tempdir().expect("autoscale refill tempdir");
+    let snapshot_dir = temp.path().join("snapshots");
+    let pod_id = format!("live-autoscale-refill-{}", uuid::Uuid::new_v4().simple());
+    let driver = firkin_single_node::AppleVzLocalRuntimeDriver::with_snapshot_dir(
+        "python:3.12-slim",
+        firkin_single_node::PortRegistry::default(),
+        firkin_single_node::LogStore::default(),
+        &snapshot_dir,
+    );
+    let control_driver = driver.clone();
+    let mut backend = LocalRuntimeBackend::new(driver, "2026-05-06T12:00:00Z");
+    backend
+        .create_pod(PodCreateRequest {
+            pod_id: Some(pod_id.clone()),
+            timeout: Some(300),
+            metadata: BTreeMap::from([(
+                "benchmark".to_owned(),
+                "autoscale-ready-queue-refill".to_owned(),
+            )]),
+            empty_dirs: vec![
+                PodEmptyDir {
+                    name: "db".to_owned(),
+                },
+                PodEmptyDir {
+                    name: "browser".to_owned(),
+                },
+            ],
+            pod_store: PodStoreOptions {
+                size_bytes: PYTHON_PRODUCT_POD_STORE_BYTES,
+                trim_policy: PodTrimPolicy::Manual,
+                ..PodStoreOptions::default()
+            },
+            containers: ready_deck_sidecar_containers(),
+        })
+        .await
+        .expect("create autoscale refill product pod");
+    validate_ready_deck(&mut backend, &pod_id).await;
+
+    let drain_slots = (0..READY_TARGET)
+        .map(|index| format!("autoscale-drain-slot-{index}"))
+        .collect::<Vec<_>>();
+    for slot_name in &drain_slots {
+        backend
+            .add_pod_container(
+                &pod_id,
+                ready_deck_prestarted_agent_slot_container(slot_name),
+            )
+            .await
+            .expect("add drain-ready slot");
+    }
+    validate_prestarted_agent_slots(&mut backend, &pod_id, &drain_slots).await;
+
+    LiveAutoscaleReadyQueueRefillScenario {
+        backend,
+        control_driver,
+        pod_id,
+        drain_slots,
+        _temp: temp,
+    }
+}
+
+async fn collect_live_autoscale_ready_queue_refill(
+    mut scenario: LiveAutoscaleReadyQueueRefillScenario,
+    trace: &mut EventTraceRecorder,
+) -> ReadyQueueOutcomes {
+    const READY_TARGET: usize = 2;
+    for slot_name in &scenario.drain_slots {
+        dispatch_ready_deck_prestarted_agent_slot(
+            &scenario.control_driver,
+            &scenario.pod_id,
+            slot_name,
+            trace,
+        )
+        .await;
+    }
+
+    let refill_slots = (0..READY_TARGET)
+        .map(|index| format!("autoscale-refill-slot-{index}"))
+        .collect::<Vec<_>>();
+    for slot_name in &refill_slots {
+        scenario
+            .backend
+            .add_pod_container(
+                &scenario.pod_id,
+                ready_deck_prestarted_agent_slot_container(slot_name),
+            )
+            .await
+            .expect("add refill-ready slot");
+    }
+    validate_prestarted_agent_slots(&mut scenario.backend, &scenario.pod_id, &refill_slots).await;
+
+    scenario
+        .backend
+        .delete_pod(&scenario.pod_id)
+        .await
+        .expect("delete autoscale refill product pod");
+    ReadyQueueOutcomes::new(refill_slots.len() as u64, scenario.drain_slots.len() as u64)
 }
 
 fn pressure_scenario_sample(
@@ -7333,6 +9056,24 @@ fn pressure_scenario_sample(
     }
 }
 
+fn live_autoscale_pressure_stress_protection_samples(
+    counts: AutoscaleProtectionCounts,
+) -> [BenchmarkSample; 2] {
+    counts.into_samples().map(|sample| {
+        sample
+            .with_static_tag("measurement_boundary", "signed_live_product_path")
+            .with_static_tag("eviction_scope", "active_session_protection")
+            .with_static_tag("reserve_scope", "configured_runtime_floor")
+            .with_static_tag("pressure_policy", "no_pool_comfort_eviction")
+            .with_static_tag("pressure_stress_observed", "true")
+            .with_static_tag("protection_evidence_scope", "pressure_stress")
+            .with_static_tag(
+                "protection_count_source",
+                "observed_pressure_scenario_completion",
+            )
+    })
+}
+
 fn live_autoscale_ready_queue_sample(outcomes: ReadyQueueOutcomes) -> BenchmarkSample {
     let ready_hits = outcomes.ready_hits();
     let misses = outcomes.misses();
@@ -7345,17 +9086,6 @@ fn live_autoscale_ready_queue_sample(outcomes: ReadyQueueOutcomes) -> BenchmarkS
         .with_static_tag("outcome_source", "observed_product_request_results")
         .with_dynamic_tag("ready_hits", ready_hits.to_string())
         .with_dynamic_tag("misses", misses.to_string())
-}
-
-fn live_autoscale_protection_samples(counts: AutoscaleProtectionCounts) -> [BenchmarkSample; 2] {
-    counts.into_samples().map(|sample| {
-        sample
-            .with_static_tag("measurement_boundary", "signed_live_product_path")
-            .with_static_tag("eviction_scope", "active_session_protection")
-            .with_static_tag("reserve_scope", "configured_runtime_floor")
-            .with_static_tag("pressure_policy", "no_pool_comfort_eviction")
-            .with_static_tag("protection_count_source", "observed_harness_completion")
-    })
 }
 
 async fn run_live_agent_computer_probes(
@@ -7871,6 +9601,49 @@ async fn timed_live_raw_envd_direct_start(
     read_envd_start_response_timing(response, payload.as_bytes(), started).await
 }
 
+async fn timed_live_raw_envd_direct_send_input(
+    client: &reqwest::Client,
+    envd_url: &str,
+    pid: u32,
+    data: Vec<u8>,
+) {
+    let response = client
+        .post(format!("{envd_url}/process.Process/SendInput"))
+        .header(CONTENT_TYPE, "application/proto")
+        .header("connect-protocol-version", "1")
+        .body(encode_envd_send_input_request(pid, data))
+        .send()
+        .await
+        .expect("raw envd direct send-input request");
+    assert_eq!(response.status(), 200);
+    let body = response.bytes().await.expect("raw envd send-input body");
+    EnvdSendInputResponseProto::decode(body.as_ref()).expect("raw envd send-input response");
+}
+
+async fn timed_live_raw_envd_proxy_send_input(
+    client: &reqwest::Client,
+    proxy_url: &str,
+    sandbox_id: &str,
+    pid: u32,
+    data: Vec<u8>,
+) {
+    let response = client
+        .post(format!("{proxy_url}/process.Process/SendInput"))
+        .header(CONTENT_TYPE, "application/proto")
+        .header("connect-protocol-version", "1")
+        .header(
+            "host",
+            format!("{DEFAULT_ENVD_PORT}-{sandbox_id}.cube.localhost"),
+        )
+        .body(encode_envd_send_input_request(pid, data))
+        .send()
+        .await
+        .expect("raw envd proxy send-input request");
+    assert_eq!(response.status(), 200);
+    let body = response.bytes().await.expect("raw proxy send-input body");
+    EnvdSendInputResponseProto::decode(body.as_ref()).expect("raw proxy send-input response");
+}
+
 async fn timed_live_envd_direct_health(client: &reqwest::Client, envd_url: &str) -> Duration {
     let started = Instant::now();
     let response = client
@@ -8115,7 +9888,15 @@ async fn start_retained_stdin_command(sandbox: &e2b_sdk::Sandbox, command: &str)
         .pid()
 }
 
-async fn start_retained_eval_shell(sandbox: &e2b_sdk::Sandbox) -> u32 {
+type RetainedShellEventStream =
+    Pin<Box<dyn Stream<Item = e2b_sdk::Result<e2b_sdk::CommandEvent>> + Send + 'static>>;
+
+struct RetainedEvalShell {
+    pid: u32,
+    events: RetainedShellEventStream,
+}
+
+async fn start_retained_eval_shell(sandbox: &e2b_sdk::Sandbox) -> RetainedEvalShell {
     let handle = sandbox
         .commands()
         .run_background(
@@ -8128,58 +9909,163 @@ async fn start_retained_eval_shell(sandbox: &e2b_sdk::Sandbox) -> u32 {
         .await
         .unwrap();
     let pid = handle.pid();
-    handle.disconnect();
-    pid
+    RetainedEvalShell {
+        pid,
+        events: handle.into_events(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RetainedShellDispatchObservation {
+    first_stdout: Duration,
+    connect_polls: usize,
+    send_stdin: Duration,
+    output_wait: Duration,
+    dispatch_transport: &'static str,
+    runtime_stdin_write_max: Option<Duration>,
+}
+
+impl RetainedShellDispatchObservation {
+    #[cfg(test)]
+    fn from_millis_for_test(first_stdout_ms: f64, connect_polls: usize) -> Self {
+        let half = Duration::from_secs_f64(first_stdout_ms / 2000.0);
+        Self {
+            first_stdout: Duration::from_secs_f64(first_stdout_ms / 1000.0),
+            connect_polls,
+            send_stdin: half,
+            output_wait: half,
+            dispatch_transport: "connect_snapshot",
+            runtime_stdin_write_max: Some(half),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RetainedShellSendPathObservation {
+    first_stdout: Duration,
+    send_input: Duration,
+    output_wait: Duration,
 }
 
 async fn timed_retained_shell_dispatch_first_stdout(
     sandbox: &e2b_sdk::Sandbox,
     command: &str,
-) -> Duration {
-    let pid = start_retained_eval_shell(sandbox).await;
-    let observed = dispatch_retained_shell_first_stdout(sandbox, pid, command).await;
+) -> RetainedShellDispatchObservation {
+    let mut shell = start_retained_eval_shell(sandbox).await;
+    let warmup = format!("printf retained-shell-warmup-{}", uuid::Uuid::new_v4());
+    let _ = dispatch_retained_shell_first_stdout(sandbox, &mut shell, &warmup).await;
+    let observed = dispatch_retained_shell_first_stdout(sandbox, &mut shell, command).await;
     assert!(
         sandbox
             .commands()
-            .kill(pid, e2b_sdk::CommandRequestOpts::default())
+            .kill(shell.pid, e2b_sdk::CommandRequestOpts::default())
             .await
             .unwrap()
     );
     observed
 }
 
+async fn dispatch_retained_shell_first_stdout_with_send<F, Fut>(
+    shell: &mut RetainedEvalShell,
+    command: &str,
+    send: F,
+) -> RetainedShellSendPathObservation
+where
+    F: FnOnce(u32, Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let started = Instant::now();
+    let send_started = Instant::now();
+    send(shell.pid, format!("{command}\n").into_bytes()).await;
+    let send_input = send_started.elapsed();
+    let expected = command
+        .strip_prefix("printf ")
+        .expect("retained shell send-path benchmark uses printf payload");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let output_wait_started = Instant::now();
+            let event = shell
+                .events
+                .next()
+                .await
+                .expect("retained shell stream ended")
+                .expect("retained shell stream event");
+            let output_wait = output_wait_started.elapsed();
+            match event {
+                e2b_sdk::CommandEvent::Stdout(stdout) if stdout.contains(expected) => {
+                    return RetainedShellSendPathObservation {
+                        first_stdout: started.elapsed(),
+                        send_input,
+                        output_wait,
+                    };
+                }
+                e2b_sdk::CommandEvent::Exit(result) => {
+                    panic!(
+                        "retained shell exited before stdout `{expected}`: status={} stdout={} stderr={}",
+                        result.exit_code, result.stdout, result.stderr
+                    );
+                }
+                e2b_sdk::CommandEvent::Stdout(_)
+                | e2b_sdk::CommandEvent::Stderr(_)
+                | e2b_sdk::CommandEvent::Pty(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("retained shell send-path dispatch timed out")
+}
+
 async fn dispatch_retained_shell_first_stdout(
     sandbox: &e2b_sdk::Sandbox,
-    pid: u32,
+    shell: &mut RetainedEvalShell,
     command: &str,
-) -> Duration {
+) -> RetainedShellDispatchObservation {
     let started = Instant::now();
+    let send_started = Instant::now();
     sandbox
         .commands()
         .send_stdin(
-            pid,
+            shell.pid,
             format!("{command}\n").into_bytes(),
             e2b_sdk::CommandRequestOpts::default(),
         )
         .await
         .unwrap();
+    let send_stdin = send_started.elapsed();
     let expected = command
         .strip_prefix("printf ")
         .expect("retained shell dispatch benchmark uses printf payload");
     let observed = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let connected = sandbox
-                .commands()
-                .connect(pid, e2b_sdk::CommandRequestOpts::default())
+            let output_wait_started = Instant::now();
+            let event = shell
+                .events
+                .next()
                 .await
-                .unwrap()
-                .wait()
-                .await
-                .unwrap();
-            if connected.stdout.contains(expected) {
-                return started.elapsed();
+                .expect("retained shell stream ended")
+                .expect("retained shell stream event");
+            let output_wait = output_wait_started.elapsed();
+            match event {
+                e2b_sdk::CommandEvent::Stdout(stdout) if stdout.contains(expected) => {
+                    return RetainedShellDispatchObservation {
+                        first_stdout: started.elapsed(),
+                        connect_polls: 0,
+                        send_stdin,
+                        output_wait,
+                        dispatch_transport: "start_stream_events",
+                        runtime_stdin_write_max: None,
+                    };
+                }
+                e2b_sdk::CommandEvent::Exit(result) => {
+                    panic!(
+                        "retained shell exited before stdout `{expected}`: status={} stdout={} stderr={}",
+                        result.exit_code, result.stdout, result.stderr
+                    );
+                }
+                e2b_sdk::CommandEvent::Stdout(_)
+                | e2b_sdk::CommandEvent::Stderr(_)
+                | e2b_sdk::CommandEvent::Pty(_) => {}
             }
-            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -8190,39 +10076,60 @@ async fn dispatch_retained_shell_first_stdout(
 async fn retained_shell_dispatch_density_p95(
     sandboxes: &[LiveSdkSandboxTiming],
     concurrency: usize,
-) -> Duration {
-    let mut shell_pids = Vec::with_capacity(sandboxes.len());
+) -> RetainedShellDispatchObservation {
+    let mut shells = Vec::with_capacity(sandboxes.len());
     for timing in sandboxes {
-        shell_pids.push(start_retained_eval_shell(&timing.sandbox).await);
+        shells.push(start_retained_eval_shell(&timing.sandbox).await);
     }
-    let dispatches =
-        join_all(
-            sandboxes
-                .iter()
-                .zip(shell_pids.iter().copied())
-                .enumerate()
-                .map(|(index, (timing, pid))| {
-                    let command = format!("printf retained-density-{index}");
-                    async move {
-                        dispatch_retained_shell_first_stdout(&timing.sandbox, pid, &command).await
-                    }
-                }),
-        )
+    let warmups =
+        join_all(sandboxes.iter().zip(shells.iter_mut()).enumerate().map(
+            |(index, (timing, shell))| {
+                let command = format!("printf retained-density-warmup-{index}");
+                async move {
+                    dispatch_retained_shell_first_stdout(&timing.sandbox, shell, &command).await
+                }
+            },
+        ))
         .await;
-    for (timing, pid) in sandboxes.iter().zip(shell_pids) {
+    assert_eq!(warmups.len(), sandboxes.len());
+    let dispatches =
+        join_all(sandboxes.iter().zip(shells.iter_mut()).enumerate().map(
+            |(index, (timing, shell))| {
+                let command = format!("printf retained-density-{index}");
+                async move {
+                    dispatch_retained_shell_first_stdout(&timing.sandbox, shell, &command).await
+                }
+            },
+        ))
+        .await;
+    for (timing, shell) in sandboxes.iter().zip(shells) {
         assert!(
             timing
                 .sandbox
                 .commands()
-                .kill(pid, e2b_sdk::CommandRequestOpts::default())
+                .kill(shell.pid, e2b_sdk::CommandRequestOpts::default())
                 .await
                 .unwrap()
         );
     }
     dispatches
         .into_iter()
-        .max()
+        .max_by_key(|observation| observation.first_stdout)
         .unwrap_or_else(|| panic!("retained shell density c{concurrency} had no dispatches"))
+}
+
+async fn runtime_stdin_write_max_since(
+    adapter: &firkin_runtime::FirkinRuntimeAdapter<ReadyLiveLauncher>,
+    offset: usize,
+) -> Option<Duration> {
+    adapter
+        .benchmark_samples()
+        .await
+        .into_iter()
+        .skip(offset)
+        .filter(|sample| sample.metric() == "sandbox.exec.stdin_write_latency_ms")
+        .map(|sample| Duration::from_secs_f64(sample.value() / 1000.0))
+        .max()
 }
 
 async fn finish_retained_stdin_command(

@@ -26,8 +26,8 @@ pub const REQUIRED_LIFECYCLE_LATENCY_METRICS: &[&str] = &[
     "start.warm_to_first_stdout_ms",
     "start.agent_task_ready_ms",
     "pool.lease_ms",
-    "exec.command_start_ms",
-    "exec.first_stdout_byte_ms",
+    "exec.direct_command_start_ms",
+    "exec.direct_first_stdout_byte_ms",
     "exec.batch_100_small_commands_ms",
 ];
 /// Required lifecycle latency target shape.
@@ -81,16 +81,16 @@ pub const REQUIRED_LIFECYCLE_LATENCY_TARGETS: &[RequiredLifecycleLatencyTarget] 
         notes: "pool-lease-only",
     },
     RequiredLifecycleLatencyTarget {
-        name: "exec.command_start_ms",
+        name: "exec.direct_command_start_ms",
         p50_ms: 15,
         p95_ms: 25,
-        notes: "exec-request-sent-through-process-start",
+        notes: "direct-exec-request-sent-through-process-start",
     },
     RequiredLifecycleLatencyTarget {
-        name: "exec.first_stdout_byte_ms",
+        name: "exec.direct_first_stdout_byte_ms",
         p50_ms: 20,
         p95_ms: 35,
-        notes: "exec-request-sent-through-first-stdout-byte",
+        notes: "direct-exec-request-sent-through-first-stdout-byte",
     },
     RequiredLifecycleLatencyTarget {
         name: "exec.batch_100_small_commands_ms",

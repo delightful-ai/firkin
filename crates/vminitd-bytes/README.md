@@ -5,12 +5,12 @@
 
 Build modes:
 
-- default builds use `runtime-download` and compile without embedded bytes for
-  normal package consumers;
-- disabling default features embeds verified local artifacts from
-  `vminitd/bin/` or explicit `FIRKIN_VMINITD_PATH` and `FIRKIN_VMEXEC_PATH`
-  overrides; if the pinned URLs are populated, `build.rs` downloads and caches
-  missing artifacts under `$CARGO_TARGET_DIR/firkin-vminitd/`;
+- default builds embed verified local artifacts from `vminitd/bin/` or explicit
+  `FIRKIN_VMINITD_PATH` and `FIRKIN_VMEXEC_PATH` overrides; if the pinned URLs
+  are populated, `build.rs` downloads and caches missing artifacts under
+  `$CARGO_TARGET_DIR/firkin-vminitd/`;
+- `runtime-download` compiles without embedded bytes for environments that will
+  resolve artifacts later;
 - `vendored-vminitd` requires the pinned artifacts under `vendor/vminitd/`.
 
 The build script verifies SHA-256 values from

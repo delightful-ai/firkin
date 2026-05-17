@@ -743,12 +743,6 @@ impl Shell {
     }
 }
 
-impl Drop for Shell {
-    fn drop(&mut self) {
-        self.inner.closed.store(true, Ordering::Release);
-    }
-}
-
 #[derive(Clone)]
 pub struct ShellPool {
     shells: Arc<[Shell]>,
@@ -1197,6 +1191,30 @@ mod tests {
         let sent = backend.sent.lock().expect("sent lock");
         assert_eq!(sent.len(), 1);
         assert!(String::from_utf8_lossy(&sent[0]).contains("printf hi && printf err >&2"));
+    }
+
+    #[tokio::test]
+    async fn retained_shell_clone_drop_does_not_close_shared_shell() {
+        let backend = Arc::new(RetainedShellBackend::new());
+        let client = super::ProcessClient::from((
+            backend.clone() as Arc<dyn SandboxBackend>,
+            SandboxId::new("sbx_retained_clone").expect("sandbox id"),
+        ));
+        let shell = client.shell().await.expect("open shell");
+        let lease = shell.clone();
+        drop(lease);
+
+        let plan = ShellCommandPlan::new(&Command::shell("printf hi")).expect("shell command plan");
+        let output = shell
+            .run_plan_with_nonce(plan, "00000000000000000000000000000000".to_owned())
+            .await
+            .expect("run retained shell command after clone drop");
+
+        assert_eq!(output.stdout, Bytes::from_static(b"hi"));
+        assert_eq!(
+            output.status,
+            super::CommandStatus::Exited(super::CommandExit::success())
+        );
     }
 
     #[test]

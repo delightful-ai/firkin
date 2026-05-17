@@ -65,7 +65,9 @@ use firkin_artifacts::{ContinuationSnapshotPlan, ContinuationSnapshotReason};
 #[allow(unused_imports)]
 use firkin_e2b_contract::PreparedTemplateArtifactIntegrity;
 #[allow(unused_imports)]
-use firkin_envd::{EnvdProcessEventStream, EnvdProcessInfo, EnvdProcessOutput};
+use firkin_envd::{
+    EnvdProcessEventStream, EnvdProcessInfo, EnvdProcessOutput, EnvdProcessStreamEvent,
+};
 #[allow(unused_imports)]
 use firkin_template::FreshnessSyncGate;
 #[allow(unused_imports)]
@@ -107,6 +109,7 @@ use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::Mutex;
 #[allow(unused_imports)]
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 #[allow(unused_imports)]
 use tokio::task::JoinHandle;
 #[allow(unused_imports)]
@@ -243,6 +246,19 @@ impl Drop for ActiveQueueWaiter {
         self.pending.fetch_sub(1, Ordering::SeqCst);
     }
 }
+
+async fn forward_interactive_process_event(
+    sender: &mpsc::Sender<Result<EnvdProcessStreamEvent, BackendError>>,
+    event: Result<EnvdProcessStreamEvent, BackendError>,
+) {
+    match sender.try_send(event) {
+        Err(mpsc::error::TrySendError::Full(event)) => {
+            let _ = sender.send(event).await;
+        }
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+    }
+}
+
 /// E2B `RuntimeAdapter` backed by Firkin snapshot restore.
 ///
 /// The adapter is the CubeAPI-facing bridge: E2B/Cube keeps product semantics
@@ -1777,14 +1793,22 @@ where
     ) -> Result<PortProxyStream, BackendError> {
         let PortTarget::Vsock { cid, port } = target else {
             return match target {
-                PortTarget::Tcp { host, port } => TcpStream::connect((host.as_str(), port))
-                    .await
-                    .map(|stream| Box::new(stream) as PortProxyStream)
-                    .map_err(|error| {
+                PortTarget::Tcp { host, port } => {
+                    let stream =
+                        TcpStream::connect((host.as_str(), port))
+                            .await
+                            .map_err(|error| {
+                                BackendError::Runtime(format!(
+                                    "failed to connect Firkin proxy target {host}:{port}: {error}"
+                                ))
+                            })?;
+                    stream.set_nodelay(true).map_err(|error| {
                         BackendError::Runtime(format!(
-                            "failed to connect Firkin proxy target {host}:{port}: {error}"
+                            "failed to configure Firkin proxy target {host}:{port} TCP_NODELAY: {error}"
                         ))
-                    }),
+                    })?;
+                    Ok(Box::new(stream) as PortProxyStream)
+                }
                 PortTarget::UnixSocket { path } => UnixStream::connect(&path)
                     .await
                     .map(|stream| Box::new(stream) as PortProxyStream)
@@ -1983,8 +2007,9 @@ where
         request: EnvdProcessStartRequest,
     ) -> Result<EnvdProcessEventStream<BackendError>, BackendError> {
         if request.stdin == Some(true) || request.pty.is_some() {
-            let output = self.start_process_for(sandbox_id, request).await?;
-            return Ok(EnvdProcessEventStream::from_output(&output));
+            return self
+                .start_interactive_process_stream_for(sandbox_id, request)
+                .await;
         }
         let (sandbox_id, session) = self.process_session_for(sandbox_id, "start stream").await?;
         let event_trace = self.take_startup_event_trace(&sandbox_id).await?;
@@ -2038,6 +2063,61 @@ where
         Ok(stream)
     }
 
+    async fn start_interactive_process_stream_for(
+        &self,
+        sandbox_id: Option<&str>,
+        request: EnvdProcessStartRequest,
+    ) -> Result<EnvdProcessEventStream<BackendError>, BackendError> {
+        let (sandbox_id, session) = self.process_session_for(sandbox_id, "start stream").await?;
+        let report = session
+            .lock()
+            .await
+            .start_interactive_process(&request)
+            .await
+            .map_err(|error| {
+                BackendError::Runtime(format!(
+                    "Firkin interactive process stream start failed: {error}"
+                ))
+            })?;
+        let mut state = self.state.lock().await;
+        state
+            .benchmark_samples
+            .extend_from_slice(report.benchmark_samples());
+        let (output, _, process, live_stream) = report.into_parts_with_stream();
+        let pid = output.pid;
+        let key = FirkinRuntimeProcessKey { sandbox_id, pid };
+        state.processes.insert(
+            key.clone(),
+            FirkinRuntimeProcessRecord {
+                info: EnvdProcessInfo {
+                    pid,
+                    tag: request.tag,
+                    cmd: request.cmd,
+                    args: request.args,
+                    envs: request.envs,
+                    cwd: request.cwd,
+                },
+                output: output.clone(),
+            },
+        );
+        state.interactive_processes.insert(key, process);
+        drop(state);
+
+        let Some(mut live_stream) = live_stream else {
+            return Ok(EnvdProcessEventStream::from_output(&output));
+        };
+        let (sender, receiver) = mpsc::channel(32);
+        sender
+            .try_send(Ok(EnvdProcessStreamEvent::Start { pid }))
+            .expect("fresh process event stream channel has capacity");
+        tokio::spawn(async move {
+            while let Some(event) = live_stream.recv().await {
+                forward_interactive_process_event(&sender, event).await;
+            }
+        });
+        Ok(EnvdProcessEventStream::from_receiver(receiver))
+    }
+
     async fn take_startup_event_trace(
         &self,
         sandbox_id: &str,
@@ -2078,7 +2158,7 @@ where
             first_command_samples
                 .extend(sandbox_first_command_samples(&request, &benchmark_samples));
             Some(BenchmarkSample::new(
-                "sandbox.start.resume_snapshot_to_first_stdout_ms",
+                "start.resume_to_first_stdout_ms",
                 BenchmarkMetricKind::LifecycleLatency,
                 BenchmarkUnit::Milliseconds,
                 command_started
@@ -2199,12 +2279,24 @@ where
             .await
         {
             Ok((key, mut process)) => {
+                let started = Instant::now();
                 let result = process.send_input(input).await;
-                self.state
-                    .lock()
-                    .await
-                    .interactive_processes
-                    .insert(key, process);
+                let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let mut state = self.state.lock().await;
+                state.interactive_processes.insert(key, process);
+                if result.is_ok() {
+                    state.benchmark_samples.push(
+                        BenchmarkSample::new(
+                            "sandbox.exec.stdin_write_latency_ms",
+                            BenchmarkMetricKind::LifecycleLatency,
+                            BenchmarkUnit::Milliseconds,
+                            latency_ms,
+                        )
+                        .with_static_tag("measurement_boundary", "runtime_process_write_flush")
+                        .with_static_tag("excludes_client_http", "true")
+                        .with_static_tag("excludes_envd_rpc_decode", "true"),
+                    );
+                }
                 result
             }
             Err(BackendError::Runtime(_)) => {

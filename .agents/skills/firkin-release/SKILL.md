@@ -63,8 +63,8 @@ firkin-vminitd-client
 firkin-e2b-contract
 firkin-e2b-server
 firkin-core
-firkin-benchmark
 firkin-runtime
+firkin-benchmark
 firkin-single-node
 firkin
 ```
@@ -88,7 +88,7 @@ The repository should contain:
 - `.github/workflows/publish.yml` for manual crates.io publication with the
   `crates-io` environment and `CRATES_IO_TOKEN` secret.
 - `.github/workflows/release.yml` for draft prerelease artifacts on
-  `v0.0.1-alpha*` tags.
+  `v0.1.0*` tags.
 
 After push, confirm:
 

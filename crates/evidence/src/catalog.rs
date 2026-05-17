@@ -208,14 +208,13 @@ const fn ownership(
 pub const P0_SCORECARD_METRICS: &[&str] = &[
     "start.hot_to_first_stdout_ms",
     "start.hot_to_ready_ms",
-    "start.resume_to_first_stdout_ms",
     "start.warm_to_first_stdout_ms",
     "start.agent_task_ready_ms",
     "pool.lease_ms",
-    "exec.command_start_ms",
-    "exec.first_stdout_byte_ms",
+    "exec.direct_command_start_ms",
+    "exec.direct_first_stdout_byte_ms",
     "exec.batch_100_small_commands_ms",
-    "density.max_active_before_hot_to_first_stdout_p95_doubles",
+    "density.max_active_before_retained_shell_first_stdout_p95_doubles",
     "disk.sparse_bloat_after_trim",
     "disk.host_bytes_reclaimed_after_trim",
     "cleanup.leftover_bytes",
@@ -266,12 +265,6 @@ pub const P0_SCORECARD_MEASUREMENT_COVERAGE: &[BenchmarkMeasurementCoverage] = &
         "derived from PoolLeaseAcquired through ReadyProbePassed on the hot readiness path",
     ),
     coverage(
-        "start.resume_to_first_stdout_ms",
-        BenchmarkMeasurementStatus::SignedLiveExact,
-        "event_trace:start.resume_to_first_stdout_ms",
-        "derived from SnapshotRestoreStart through FirstStdoutByte on the resumed tiny-exec path",
-    ),
-    coverage(
         "start.warm_to_first_stdout_ms",
         BenchmarkMeasurementStatus::SignedLiveExact,
         "event_trace:start.warm_to_first_stdout_ms",
@@ -290,16 +283,16 @@ pub const P0_SCORECARD_MEASUREMENT_COVERAGE: &[BenchmarkMeasurementCoverage] = &
         "derived from PoolLeaseRequested through PoolLeaseAcquired and excludes readiness, workspace, exec, stdout, and cleanup",
     ),
     coverage(
-        "exec.command_start_ms",
+        "exec.direct_command_start_ms",
         BenchmarkMeasurementStatus::SignedLiveExact,
-        "event_trace:exec.command_start_ms",
-        "derived from ExecRequestSent through ProcessStarted",
+        "event_trace:exec.direct_command_start_ms",
+        "derived from ExecRequestSent through ProcessStarted on the direct argv exec workload",
     ),
     coverage(
-        "exec.first_stdout_byte_ms",
+        "exec.direct_first_stdout_byte_ms",
         BenchmarkMeasurementStatus::SignedLiveExact,
-        "event_trace:exec.first_stdout_byte_ms",
-        "derived from ExecRequestSent through FirstStdoutByte",
+        "event_trace:exec.direct_first_stdout_byte_ms",
+        "derived from ExecRequestSent through FirstStdoutByte on the direct argv exec workload",
     ),
     coverage(
         "exec.batch_100_small_commands_ms",
@@ -308,10 +301,10 @@ pub const P0_SCORECARD_MEASUREMENT_COVERAGE: &[BenchmarkMeasurementCoverage] = &
         "derived from the first batch ExecRequestSent through the final ProcessExited",
     ),
     coverage(
-        "density.max_active_before_hot_to_first_stdout_p95_doubles",
+        "density.max_active_before_retained_shell_first_stdout_p95_doubles",
         BenchmarkMeasurementStatus::SignedLiveExact,
-        "event_trace:density.max_active_before_hot_to_first_stdout_p95_doubles",
-        "derived from hot-to-first-stdout p95 points in the concurrent-create workload only",
+        "event_trace:density.max_active_before_retained_shell_first_stdout_p95_doubles",
+        "derived from retained-shell first-stdout p95 points under concurrent dispatch",
     ),
     coverage(
         "disk.sparse_bloat_after_trim",
@@ -392,7 +385,7 @@ pub const AUTOSCALE_EFFICIENCY_MEASUREMENT_COVERAGE: &[BenchmarkMeasurementCover
         "density.prestarted_agent_slot_fifo_acceptance_p95_ms",
         BenchmarkMeasurementStatus::UnitValidatedOnly,
         "autoscale_trace:density.prestarted_agent_slot_fifo_acceptance_p95_ms",
-        "unit-validated FIFO acceptance snappy guard for prestarted slots; still requires signed-live request ordering under real product load",
+        "unit-validated absolute FIFO acceptance guard for already-running slots; signed-live smoke proves the c4 checkout path while the p95-doubling breakpoint remains diagnostic",
     ),
     coverage(
         "autoscale.active_evictions_due_to_pool_pressure",
@@ -473,9 +466,9 @@ pub const BENCHMARK_METRIC_OWNERSHIP: &[BenchmarkMetricOwnership] = &[
     ),
     ownership(
         BenchmarkMetricMatch::Exact("density.prestarted_agent_slot_fifo_acceptance_p95_ms"),
-        "density_prestarted_agent_slot_fifo",
+        "density_prestarted_agent_slot_fifo_acceptance",
         "firkin-benchmark/firkin-runtime/firkin-single-node",
-        "inspect FIFO request acceptance for already-running prestarted agent slots",
+        "inspect absolute FIFO acceptance latency for already-running prestarted agent slots",
     ),
     ownership(
         BenchmarkMetricMatch::Exact("autoscale.active_evictions_due_to_pool_pressure"),
@@ -526,16 +519,16 @@ pub const BENCHMARK_METRIC_OWNERSHIP: &[BenchmarkMetricOwnership] = &[
         "inspect pool lookup and lease acquisition without readiness, workspace, exec, stdout, or cleanup",
     ),
     ownership(
-        BenchmarkMetricMatch::Exact("exec.command_start_ms"),
-        "exec_first_process",
+        BenchmarkMetricMatch::Exact("exec.direct_command_start_ms"),
+        "direct_exec_first_process",
         "firkin-vminitd-client/firkin-runtime",
-        "inspect exec RPC dispatch, vsock handoff, and guest process start",
+        "inspect direct exec RPC dispatch, vsock handoff, and guest process start without shell startup",
     ),
     ownership(
-        BenchmarkMetricMatch::Exact("exec.first_stdout_byte_ms"),
-        "exec_first_output",
+        BenchmarkMetricMatch::Exact("exec.direct_first_stdout_byte_ms"),
+        "direct_exec_first_output",
         "firkin-vminitd-client/firkin-runtime",
-        "inspect stdout transport buffering and first-byte propagation",
+        "inspect direct exec stdout transport buffering and first-byte propagation without shell startup",
     ),
     ownership(
         BenchmarkMetricMatch::Exact("exec.batch_100_small_commands_ms"),
@@ -544,10 +537,12 @@ pub const BENCHMARK_METRIC_OWNERSHIP: &[BenchmarkMetricOwnership] = &[
         "inspect small-command batch dispatch and final process exit",
     ),
     ownership(
-        BenchmarkMetricMatch::Exact("density.max_active_before_hot_to_first_stdout_p95_doubles"),
-        "density_hot_to_stdout",
+        BenchmarkMetricMatch::Exact(
+            "density.max_active_before_retained_shell_first_stdout_p95_doubles",
+        ),
+        "density_retained_shell_stdout",
         "firkin-benchmark/firkin-runtime",
-        "inspect concurrent-create sweep for the hot-to-first-stdout p95 breakpoint",
+        "inspect retained-shell concurrent dispatch p95 breakpoint",
     ),
     ownership(
         BenchmarkMetricMatch::Exact("disk.sparse_bloat_after_trim"),
@@ -596,12 +591,6 @@ pub const BENCHMARK_METRIC_OWNERSHIP: &[BenchmarkMetricOwnership] = &[
         "startup_warm_restore",
         "firkin-runtime/firkin-single-node",
         "inspect warm snapshot restore and ready-template checkout path",
-    ),
-    ownership(
-        BenchmarkMetricMatch::Exact("sandbox.start.resume_snapshot_to_first_stdout_ms"),
-        "startup_resume_to_stdout",
-        "firkin-runtime/firkin-single-node",
-        "inspect composed restore, readiness, envd routing, command dispatch, and first stdout path",
     ),
     ownership(
         BenchmarkMetricMatch::Exact("cold_template_build"),
@@ -821,12 +810,11 @@ pub const BENCHMARK_METRIC_CATALOG: &[BenchmarkMetricDefinition] = &[
     metric("sandbox.start.total_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "request-to-ready-total"),
     metric("start.hot_to_first_stdout_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::P0Dashboard, "pool-lease-acquired-to-first-stdout"),
     metric("start.hot_to_ready_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::P0Dashboard, "pool-lease-acquired-to-exec-proven-ready"),
-    metric("start.resume_to_first_stdout_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::P0Dashboard, "snapshot-restore-start-to-first-stdout"),
+    metric("start.resume_to_first_stdout_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "raw-snapshot-restore-start-to-first-stdout"),
     metric("start.warm_to_first_stdout_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::P0Dashboard, "warm-request-start-to-first-stdout"),
     metric("pool.lease_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::P0Dashboard, "pool-lease-requested-to-acquired"),
     metric("sandbox.start.warm_ready_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "legacy-warm-local-image-ready"),
     metric("sandbox.start.cold_ready_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "legacy-cold-local-image-ready"),
-    metric("sandbox.start.resume_snapshot_to_first_stdout_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "legacy-snapshot-restore-to-first-command-stdout"),
     metric("sandbox.start.hot_pool_checkout_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "legacy-hot-pool-checkout-to-ready"),
     metric("sandbox.start.request_received_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Drilldown, "host-request-accepted"),
     metric("sandbox.start.config_built_ms", BenchmarkMetricGroup::Startup, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "runtime-config-build"),
@@ -859,8 +847,10 @@ pub const BENCHMARK_METRIC_CATALOG: &[BenchmarkMetricDefinition] = &[
 
     metric("sandbox.exec.count", BenchmarkMetricGroup::Exec, BenchmarkMetricKind::WorkloadResource, BenchmarkUnit::Count, BenchmarkRequirementLevel::Core, "executed-command-count"),
     metric("sandbox.exec.latency_ms", BenchmarkMetricGroup::Exec, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "exec-request-roundtrip"),
-    metric("exec.command_start_ms", BenchmarkMetricGroup::Exec, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::P0Dashboard, "exec-request-sent-to-process-started"),
-    metric("exec.first_stdout_byte_ms", BenchmarkMetricGroup::Exec, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::P0Dashboard, "exec-request-sent-to-first-stdout-byte"),
+    metric("exec.command_start_ms", BenchmarkMetricGroup::Exec, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Drilldown, "aggregate-exec-request-sent-to-process-started"),
+    metric("exec.first_stdout_byte_ms", BenchmarkMetricGroup::Exec, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Drilldown, "aggregate-exec-request-sent-to-first-stdout-byte"),
+    metric("exec.direct_command_start_ms", BenchmarkMetricGroup::Exec, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::P0Dashboard, "direct-argv-exec-request-sent-to-process-started"),
+    metric("exec.direct_first_stdout_byte_ms", BenchmarkMetricGroup::Exec, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::P0Dashboard, "direct-argv-exec-request-sent-to-first-stdout-byte"),
     metric("exec.batch_100_small_commands_ms", BenchmarkMetricGroup::Exec, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::P0Dashboard, "retained-shell-batch-100-small-commands-through-final-process-exit"),
     metric("sandbox.exec.first_latency_ms", BenchmarkMetricGroup::Exec, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "legacy-first-exec-latency"),
     metric("sandbox.exec.first_stdout_ms", BenchmarkMetricGroup::Exec, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "legacy-exec-request-to-first-stdout"),
@@ -1011,7 +1001,8 @@ pub const BENCHMARK_METRIC_CATALOG: &[BenchmarkMetricDefinition] = &[
     metric("sandbox.density.ready_p95_by_concurrency_ms", BenchmarkMetricGroup::Density, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "ready-p95-under-concurrency"),
     metric("sandbox.density.task_wall_p95_by_concurrency_ms", BenchmarkMetricGroup::Density, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::Core, "task-wall-p95-under-concurrency"),
     metric("sandbox.density.max_idle_hot_sandboxes_before_pressure", BenchmarkMetricGroup::Density, BenchmarkMetricKind::WorkloadResource, BenchmarkUnit::Count, BenchmarkRequirementLevel::Core, "max-idle-hot-pool-before-pressure"),
-    metric("density.max_active_before_hot_to_first_stdout_p95_doubles", BenchmarkMetricGroup::Density, BenchmarkMetricKind::WorkloadResource, BenchmarkUnit::Count, BenchmarkRequirementLevel::P0Dashboard, "max-active-before-hot-to-first-stdout-p95-doubles"),
+    metric("density.max_active_before_hot_to_first_stdout_p95_doubles", BenchmarkMetricGroup::Density, BenchmarkMetricKind::WorkloadResource, BenchmarkUnit::Count, BenchmarkRequirementLevel::Core, "max-active-before-hot-to-first-stdout-p95-doubles"),
+    metric("density.max_active_before_retained_shell_first_stdout_p95_doubles", BenchmarkMetricGroup::Density, BenchmarkMetricKind::WorkloadResource, BenchmarkUnit::Count, BenchmarkRequirementLevel::P0Dashboard, "max-active-before-retained-shell-first-stdout-p95-doubles"),
     metric("density.max_agent_computers_before_ready_p95_doubles", BenchmarkMetricGroup::Density, BenchmarkMetricKind::WorkloadResource, BenchmarkUnit::Count, BenchmarkRequirementLevel::AutoscaleDashboard, "max-browser-database-cli-agent-computers-before-product-ready-p95-doubles"),
     metric("density.max_prestarted_agent_slots_before_checkout_ready_p95_doubles", BenchmarkMetricGroup::Density, BenchmarkMetricKind::WorkloadResource, BenchmarkUnit::Count, BenchmarkRequirementLevel::AutoscaleDashboard, "max-prestarted-agent-slots-before-checkout-ready-p95-doubles"),
     metric("density.prestarted_agent_slot_fifo_acceptance_p95_ms", BenchmarkMetricGroup::Density, BenchmarkMetricKind::LifecycleLatency, BenchmarkUnit::Milliseconds, BenchmarkRequirementLevel::AutoscaleDashboard, "prestarted-agent-slot-fifo-acceptance-p95-snappy-guard"),
@@ -1341,6 +1332,14 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
 
+        assert_eq!(
+            AUTOSCALE_EFFICIENCY_SCORECARD_METRICS
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len(),
+            AUTOSCALE_EFFICIENCY_SCORECARD_METRICS.len()
+        );
         assert_eq!(scorecard_autoscale_only, catalog_autoscale);
 
         for name in AUTOSCALE_EFFICIENCY_SCORECARD_METRICS {
@@ -1440,7 +1439,6 @@ mod tests {
             "density.max_agent_computers_before_ready_p95_doubles",
             "autoscale.active_evictions_due_to_pool_pressure",
             "autoscale.reserve_floor_violations",
-            "density.prestarted_agent_slot_fifo_acceptance_p95_ms",
         ] {
             assert_eq!(
                 coverage.get(metric).copied(),

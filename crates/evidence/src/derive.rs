@@ -638,6 +638,7 @@ const fn lifecycle_to_trace(lifecycle: ContractLifecycleClass) -> TraceLifecycle
 const fn workload_to_trace(workload: ContractWorkloadClass) -> TraceWorkloadClass {
     match workload {
         ContractWorkloadClass::TinyExec => TraceWorkloadClass::TinyExec,
+        ContractWorkloadClass::DirectExec => TraceWorkloadClass::DirectExec,
         ContractWorkloadClass::ShellExec => TraceWorkloadClass::ShellExec,
         ContractWorkloadClass::Batch100Execs => TraceWorkloadClass::Batch100Execs,
         ContractWorkloadClass::DiskBloatReclaim => TraceWorkloadClass::DiskBloatReclaim,

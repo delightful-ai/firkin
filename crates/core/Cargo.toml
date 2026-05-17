@@ -1,14 +1,11 @@
 [package]
 name = "firkin-core"
 description = "Container orchestration surface for the firkin Rust containerization library"
-version = "0.0.1-alpha"
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
 
 [lib]
 name = "firkin_core"
@@ -20,13 +17,13 @@ real-vm = ["snapshot"]
 snapshot = ["firkin-vmm/snapshot"]
 
 [dependencies]
-firkin-ext4 = { path = "../ext4", version = "0.0.1-alpha" }
-firkin-oci = { path = "../oci", version = "0.0.1-alpha" }
-firkin-types = { path = "../types", version = "0.0.1-alpha" }
-firkin-vminitd-bytes = { path = "../vminitd-bytes", version = "0.0.1-alpha" }
-firkin-vminitd-client = { path = "../vminitd-client", version = "0.0.1-alpha" }
-firkin-vmm = { path = "../vmm", version = "0.0.1-alpha.1" }
-firkin-vsock = { path = "../vsock", version = "0.0.1-alpha" }
+firkin-ext4 = { path = "../ext4", version = "0.1.0" }
+firkin-oci = { path = "../oci", version = "0.1.0" }
+firkin-types = { path = "../types", version = "0.1.0" }
+firkin-vminitd-bytes = { path = "../vminitd-bytes", version = "0.1.0" }
+firkin-vminitd-client = { path = "../vminitd-client", version = "0.1.0" }
+firkin-vmm = { path = "../vmm", version = "0.1.0" }
+firkin-vsock = { path = "../vsock", version = "0.1.0" }
 flate2.workspace = true
 tar.workspace = true
 tempfile.workspace = true

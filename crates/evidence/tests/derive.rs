@@ -21,6 +21,16 @@ fn event(name: SandboxEventName, ns: u128) -> SandboxTraceEvent {
     )
 }
 
+fn direct_exec_event(name: SandboxEventName, ns: u128) -> SandboxTraceEvent {
+    SandboxTraceEvent::new(
+        name,
+        ns,
+        LifecycleClass::Hot,
+        WorkloadClass::DirectExec,
+        RuntimeProfile::FastAgent,
+    )
+}
+
 fn readiness_event(name: SandboxEventName, ns: u128) -> SandboxTraceEvent {
     SandboxTraceEvent::new(
         name,
@@ -96,23 +106,43 @@ fn derives_pool_lease_without_readiness_or_exec_time() {
 #[test]
 fn induced_stdout_delay_moves_first_stdout_metric_by_same_amount() {
     let mut baseline = SandboxEventTrace::new();
-    baseline.push(event(SandboxEventName::ExecRequestSent, 10_000_000));
-    baseline.push(event(SandboxEventName::ProcessStarted, 20_000_000));
-    baseline.push(event(SandboxEventName::FirstStdoutByte, 40_000_000));
+    baseline.push(direct_exec_event(
+        SandboxEventName::ExecRequestSent,
+        10_000_000,
+    ));
+    baseline.push(direct_exec_event(
+        SandboxEventName::ProcessStarted,
+        20_000_000,
+    ));
+    baseline.push(direct_exec_event(
+        SandboxEventName::FirstStdoutByte,
+        40_000_000,
+    ));
 
     let mut delayed = SandboxEventTrace::new();
-    delayed.push(event(SandboxEventName::ExecRequestSent, 10_000_000));
-    delayed.push(event(SandboxEventName::ProcessStarted, 20_000_000));
-    delayed.push(event(SandboxEventName::FirstStdoutByte, 140_000_000));
+    delayed.push(direct_exec_event(
+        SandboxEventName::ExecRequestSent,
+        10_000_000,
+    ));
+    delayed.push(direct_exec_event(
+        SandboxEventName::ProcessStarted,
+        20_000_000,
+    ));
+    delayed.push(direct_exec_event(
+        SandboxEventName::FirstStdoutByte,
+        140_000_000,
+    ));
 
     let baseline_stdout =
-        derive_contract_metric_sample(&baseline, contract("exec.first_stdout_byte_ms")).unwrap();
+        derive_contract_metric_sample(&baseline, contract("exec.direct_first_stdout_byte_ms"))
+            .unwrap();
     let delayed_stdout =
-        derive_contract_metric_sample(&delayed, contract("exec.first_stdout_byte_ms")).unwrap();
+        derive_contract_metric_sample(&delayed, contract("exec.direct_first_stdout_byte_ms"))
+            .unwrap();
     let baseline_start =
-        derive_contract_metric_sample(&baseline, contract("exec.command_start_ms")).unwrap();
+        derive_contract_metric_sample(&baseline, contract("exec.direct_command_start_ms")).unwrap();
     let delayed_start =
-        derive_contract_metric_sample(&delayed, contract("exec.command_start_ms")).unwrap();
+        derive_contract_metric_sample(&delayed, contract("exec.direct_command_start_ms")).unwrap();
 
     assert_eq!(delayed_stdout.value() - baseline_stdout.value(), 100.0);
     assert_eq!(baseline_start.value(), delayed_start.value());
@@ -233,10 +263,22 @@ fn non_duration_dashboard_metrics_are_blocked_until_stage_values_exist() {
 #[test]
 fn available_contract_metrics_derive_canonical_exec_samples_from_one_trace() {
     let mut trace = SandboxEventTrace::new();
-    trace.push(event(SandboxEventName::ExecRequestSent, 10_000_000));
-    trace.push(event(SandboxEventName::ProcessStarted, 32_000_000));
-    trace.push(event(SandboxEventName::FirstStdoutByte, 45_000_000));
-    trace.push(event(SandboxEventName::ProcessExited, 70_000_000));
+    trace.push(direct_exec_event(
+        SandboxEventName::ExecRequestSent,
+        10_000_000,
+    ));
+    trace.push(direct_exec_event(
+        SandboxEventName::ProcessStarted,
+        32_000_000,
+    ));
+    trace.push(direct_exec_event(
+        SandboxEventName::FirstStdoutByte,
+        45_000_000,
+    ));
+    trace.push(direct_exec_event(
+        SandboxEventName::ProcessExited,
+        70_000_000,
+    ));
 
     let samples = derive_available_contract_metric_samples([trace]);
     let by_metric = samples
@@ -246,21 +288,21 @@ fn available_contract_metrics_derive_canonical_exec_samples_from_one_trace() {
 
     assert_eq!(
         by_metric
-            .get("exec.command_start_ms")
+            .get("exec.direct_command_start_ms")
             .expect("command start")
             .value(),
         22.0
     );
     assert_eq!(
         by_metric
-            .get("exec.first_stdout_byte_ms")
+            .get("exec.direct_first_stdout_byte_ms")
             .expect("first stdout")
             .value(),
         35.0
     );
     assert_eq!(
         by_metric
-            .get("exec.command_start_ms")
+            .get("exec.direct_command_start_ms")
             .expect("command start")
             .tag_value("trust"),
         Some("exact_host_event_pair")

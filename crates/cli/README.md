@@ -67,7 +67,8 @@ Current commands:
   summaries from a lifecycle benchmark evidence artifact.
 - `fk benchmark report decision ARTIFACT_JSON` prints the same artifact with
   min/mean/MAD/CV plus sample-confidence tiers such as `superfast_iteration`,
-  `fast_iteration`, `p95_decision_grade`, and `p99_decision_grade`.
+  `fast_iteration`, `baseline_checkpoint`, `p95_decision_grade`, and
+  `p99_decision_grade`.
 - `fk substrate latency-targets` prints the initial production-substrate latency
   and overhead manifest. Latency covers lifecycle paths such as warm snapshot
   restore and first stdout byte; overhead is tracked separately so VM/container
@@ -138,7 +139,8 @@ set `FIRKIN_BASELINE_AUTOSCALE_PROOF=0` to skip that slower signed-live proof,
 or `FIRKIN_BASELINE_AUTOSCALE_REPEATS=<n>` to change its sample count.
 `FIRKIN_BASELINE_SAMPLE_TIER` sets the default run duration and repeat count:
 `superfast_iteration` is `3`, `fast_iteration` is `5`,
-`p50_p90_decision_grade` is `30`, and `p95_decision_grade` is `100`.
+`baseline_checkpoint` is `10`, `p50_p90_decision_grade` is `30`, and
+`p95_decision_grade` is `100`.
 Explicit duration/repeat env vars still win. Set
 `FIRKIN_BASELINE_AGENT_COMPUTER_MIN_SAMPLES=<n>` or
 `FIRKIN_BASELINE_AUTOSCALE_MIN_SAMPLES=<n>` when validation should require a
@@ -148,14 +150,15 @@ Density sweeps are also explicit inputs:
 `FIRKIN_BASELINE_SHELL_DENSITY_LEVELS` defaults to `1,2`, while
 `FIRKIN_BASELINE_PRODUCT_POD_READY_DECK_DENSITY_LEVELS` and
 `FIRKIN_BASELINE_PRODUCT_POD_PRESTARTED_AGENT_SLOT_DENSITY_LEVELS` default to
-`1,2,4`. Use `1,2,4,8` when checking the snappy density target instead of the
-cheaper smoke shape.
+`1,2,4`. Use `1,2,4,8` when checking the snappy density target and
+`1,2,4,8,16,24,32` when finding the product-density knee instead of the cheaper
+smoke shape.
 
 | Env var | Metric | Boundary | Snappy target |
 | --- | --- | --- | ---: |
-| `FIRKIN_BASELINE_SHELL_DENSITY_LEVELS` | `density.max_active_before_hot_to_first_stdout_p95_doubles` | shell sandbox hot start to first stdout | `>=8` |
-| `FIRKIN_BASELINE_PRODUCT_POD_READY_DECK_DENSITY_LEVELS` | `density.max_agent_computers_before_ready_p95_doubles` | full browser + database + CLI product computer add/start to ready | `>=4` |
-| `FIRKIN_BASELINE_PRODUCT_POD_PRESTARTED_AGENT_SLOT_DENSITY_LEVELS` | `density.max_prestarted_agent_slots_before_checkout_ready_p95_doubles` | already-running slot checkout acceptance, excluding container add/start | `>=4` |
+| `FIRKIN_BASELINE_SHELL_DENSITY_LEVELS` | `density.max_active_before_retained_shell_first_stdout_p95_doubles` | retained-shell dispatch to first stdout | `>=8` |
+| `FIRKIN_BASELINE_PRODUCT_POD_READY_DECK_DENSITY_LEVELS` | `density.max_agent_computers_before_ready_p95_doubles` | full browser + database + CLI product computer add/start to ready | `>=8` |
+| `FIRKIN_BASELINE_PRODUCT_POD_PRESTARTED_AGENT_SLOT_DENSITY_LEVELS` | `density.max_prestarted_agent_slots_before_checkout_ready_p95_doubles` | already-running slot checkout acceptance, excluding container add/start | `>=8` |
 
 Use `docs/specs/firkin-dummy-fast-slas.md` as the optimization target board:
 it defines the snappy-first public scorecard, phase budgets, density targets,

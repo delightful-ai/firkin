@@ -1,16 +1,16 @@
-use std::ffi::{CStr, c_void};
+use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::net::Ipv4Addr;
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use block2::RcBlock;
-use dispatch2::{DispatchQueue, DispatchRetained};
+use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::encode::{Encoding, RefEncode};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send};
+use objc2::{AnyThread, ClassType, Ivars, define_class, msg_send};
 use objc2_foundation::{
     NSArray, NSData, NSError, NSFileHandle, NSObject, NSObjectProtocol, NSString, NSURL,
 };
@@ -131,93 +131,21 @@ unsafe impl RefEncode for InAddr {
 const VMNET_SHARED_MODE: u32 = 1001;
 const VMNET_SUCCESS: u32 = 1000;
 
-type VmnetNetworkConfigurationCreate =
-    unsafe extern "C" fn(mode: u32, status: *mut u32) -> VmnetNetworkConfigurationRef;
-type VmnetNetworkConfigurationDisableDhcp = unsafe extern "C" fn(cfg: VmnetNetworkConfigurationRef);
-type VmnetNetworkConfigurationSetIpv4Subnet = unsafe extern "C" fn(
-    cfg: VmnetNetworkConfigurationRef,
-    subnet: *const InAddr,
-    mask: *const InAddr,
-) -> u32;
-type VmnetNetworkCreate =
-    unsafe extern "C" fn(cfg: VmnetNetworkConfigurationRef, status: *mut u32) -> VmnetNetworkRef;
-type VmnetNetworkGetIpv4Subnet =
-    unsafe extern "C" fn(net: VmnetNetworkRef, subnet: *mut InAddr, mask: *mut InAddr);
-
-#[derive(Clone, Copy)]
-struct VmnetApi {
-    create_config: VmnetNetworkConfigurationCreate,
-    disable_dhcp: VmnetNetworkConfigurationDisableDhcp,
-    set_ipv4_subnet: VmnetNetworkConfigurationSetIpv4Subnet,
-    create_network: VmnetNetworkCreate,
-    get_ipv4_subnet: VmnetNetworkGetIpv4Subnet,
-}
-
-static VMNET_API: OnceLock<std::result::Result<VmnetApi, String>> = OnceLock::new();
-
-fn vmnet_api() -> Result<&'static VmnetApi> {
-    VMNET_API
-        .get_or_init(load_vmnet_api)
-        .as_ref()
-        .map_err(|reason| Error::UnclassifiedVz {
-            reason: reason.clone(),
-        })
-}
-
-fn load_vmnet_api() -> std::result::Result<VmnetApi, String> {
-    let handle = unsafe {
-        libc::dlopen(
-            c"/System/Library/Frameworks/vmnet.framework/vmnet".as_ptr(),
-            libc::RTLD_LAZY,
-        )
-    };
-    if handle.is_null() {
-        return Err(format!(
-            "failed to load vmnet.framework: {}",
-            dlerror_message()
-        ));
-    }
-
-    macro_rules! symbol {
-        ($name:literal, $ty:ty) => {{
-            let ptr = unsafe { libc::dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
-            if ptr.is_null() {
-                return Err(format!(
-                    "vmnet.framework is missing {}: {}",
-                    $name,
-                    dlerror_message()
-                ));
-            }
-            unsafe { std::mem::transmute::<*mut c_void, $ty>(ptr) }
-        }};
-    }
-
-    Ok(VmnetApi {
-        create_config: symbol!(
-            "vmnet_network_configuration_create",
-            VmnetNetworkConfigurationCreate
-        ),
-        disable_dhcp: symbol!(
-            "vmnet_network_configuration_disable_dhcp",
-            VmnetNetworkConfigurationDisableDhcp
-        ),
-        set_ipv4_subnet: symbol!(
-            "vmnet_network_configuration_set_ipv4_subnet",
-            VmnetNetworkConfigurationSetIpv4Subnet
-        ),
-        create_network: symbol!("vmnet_network_create", VmnetNetworkCreate),
-        get_ipv4_subnet: symbol!("vmnet_network_get_ipv4_subnet", VmnetNetworkGetIpv4Subnet),
-    })
-}
-
-fn dlerror_message() -> String {
-    let error = unsafe { libc::dlerror() };
-    if error.is_null() {
-        return "no dynamic loader error was reported".into();
-    }
-    unsafe { CStr::from_ptr(error) }
-        .to_string_lossy()
-        .into_owned()
+#[link(name = "vmnet", kind = "framework")]
+unsafe extern "C" {
+    fn vmnet_network_configuration_create(
+        mode: u32,
+        status: *mut u32,
+    ) -> VmnetNetworkConfigurationRef;
+    fn vmnet_network_configuration_disable_dhcp(cfg: VmnetNetworkConfigurationRef);
+    fn vmnet_network_configuration_set_ipv4_subnet(
+        cfg: VmnetNetworkConfigurationRef,
+        subnet: *const InAddr,
+        mask: *const InAddr,
+    ) -> u32;
+    fn vmnet_network_create(cfg: VmnetNetworkConfigurationRef, status: *mut u32)
+    -> VmnetNetworkRef;
+    fn vmnet_network_get_ipv4_subnet(net: VmnetNetworkRef, subnet: *mut InAddr, mask: *mut InAddr);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -744,7 +672,8 @@ pub(crate) fn build_configuration(config: &VmConfig) -> Result<VzConfiguration> 
 #[allow(dead_code)]
 pub(crate) async fn start(start: VzStart) -> Result<VmRuntime> {
     let configuration = start.configuration;
-    let queue = DispatchQueue::new("dev.firkin.vmm.vm", None);
+    let queue_label = CString::new("dev.firkin.vmm.vm").expect("static queue label");
+    let queue = DispatchQueue::new(Some(queue_label.as_c_str()), DispatchQueueAttr::SERIAL);
 
     // SAFETY: The configuration has already passed VZ validation, and the
     // queue is a private serial queue retained by VmRuntime for the VM life.
@@ -812,7 +741,8 @@ pub(crate) async fn start(start: VzStart) -> Result<VmRuntime> {
 #[cfg(feature = "snapshot")]
 pub(crate) async fn restore(prepared: VzStart, snapshot_path: &Path) -> Result<VmRuntime> {
     let configuration = prepared.configuration;
-    let queue = DispatchQueue::new("dev.firkin.vmm.vm", None);
+    let queue_label = CString::new("dev.firkin.vmm.vm").expect("static queue label");
+    let queue = DispatchQueue::new(Some(queue_label.as_c_str()), DispatchQueueAttr::SERIAL);
     let snapshot_url = ns_url_file(snapshot_path)?;
 
     // SAFETY: The configuration has already passed VZ validation, and the
@@ -883,19 +813,15 @@ struct RegisteredListener {
     _delegate: VzSend<Retained<ListenerDelegate>>,
 }
 
-#[derive(Debug)]
-struct ListenerDelegateIvars {
-    port: u32,
-    sender: ListenerSender,
-}
-
 define_class!(
     // SAFETY: The delegate only duplicates an fd and pushes it through a
     // tokio channel. All Objective-C references are callback-borrowed.
     #[unsafe(super(NSObject))]
     #[derive(Debug)]
-    #[ivars = ListenerDelegateIvars]
-    struct ListenerDelegate;
+    struct ListenerDelegate {
+        port: u32,
+        sender: ListenerSender,
+    }
 
     unsafe impl NSObjectProtocol for ListenerDelegate {}
 
@@ -908,13 +834,13 @@ define_class!(
             connection: &VZVirtioSocketConnection,
             _socket_device: &VZVirtioSocketDevice,
         ) -> bool {
-            let port = VsockPort::new(self.ivars().port);
+            let port = VsockPort::new(*self.port());
             match accepted_fd(port, connection) {
                 Ok(fd) => {
                     let peer = crate::VsockPeer::new(3, port);
-                    self.ivars().sender.try_send(Ok((fd, peer))).is_ok()
+                    self.sender().try_send(Ok((fd, peer))).is_ok()
                 }
-                Err(error) => self.ivars().sender.try_send(Err(error)).is_ok(),
+                Err(error) => self.sender().try_send(Err(error)).is_ok(),
             }
         }
     }
@@ -922,7 +848,7 @@ define_class!(
 
 impl ListenerDelegate {
     fn new(port: VsockPort, sender: ListenerSender) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(ListenerDelegateIvars {
+        let this = Self::alloc().set_ivars(Ivars::<Self> {
             port: port.get(),
             sender,
         });
@@ -1226,11 +1152,11 @@ struct VmnetSetup {
 }
 
 fn vmnet_setup(subnet: Option<&str>, index: usize) -> Result<VmnetSetup> {
-    let api = vmnet_api()?;
     let mut status = 0_u32;
     // SAFETY: vmnet returns an owned opaque configuration reference or null
     // with a status code.
-    let configuration = unsafe { (api.create_config)(VMNET_SHARED_MODE, &raw mut status) };
+    let configuration =
+        unsafe { vmnet_network_configuration_create(VMNET_SHARED_MODE, &raw mut status) };
     if configuration.is_null() {
         return Err(Error::UnclassifiedVz {
             reason: format!(
@@ -1243,14 +1169,19 @@ fn vmnet_setup(subnet: Option<&str>, index: usize) -> Result<VmnetSetup> {
 
     // SAFETY: The configuration reference is valid and owned by this setup.
     unsafe {
-        (api.disable_dhcp)(configuration);
+        vmnet_network_configuration_disable_dhcp(configuration);
     }
 
     if let Some(subnet) = subnet {
         let (gateway, mask) = explicit_vmnet_subnet(subnet)?;
         // SAFETY: vmnet reads the two in_addr values during this call only.
-        let status =
-            unsafe { (api.set_ipv4_subnet)(configuration, &raw const gateway, &raw const mask) };
+        let status = unsafe {
+            vmnet_network_configuration_set_ipv4_subnet(
+                configuration,
+                &raw const gateway,
+                &raw const mask,
+            )
+        };
         if status != VMNET_SUCCESS {
             return Err(Error::UnclassifiedVz {
                 reason: format!(
@@ -1265,7 +1196,7 @@ fn vmnet_setup(subnet: Option<&str>, index: usize) -> Result<VmnetSetup> {
     let mut status = 0_u32;
     // SAFETY: vmnet returns an owned opaque network reference or null with a
     // status code. The reference must outlive the VZ attachment.
-    let network = unsafe { (api.create_network)(configuration, &raw mut status) };
+    let network = unsafe { vmnet_network_create(configuration, &raw mut status) };
     if network.is_null() {
         return Err(Error::UnclassifiedVz {
             reason: format!(
@@ -1281,7 +1212,7 @@ fn vmnet_setup(subnet: Option<&str>, index: usize) -> Result<VmnetSetup> {
     // SAFETY: The network reference is valid and vmnet writes both in_addr
     // outputs synchronously.
     unsafe {
-        (api.get_ipv4_subnet)(network, &raw mut subnet_addr, &raw mut mask_addr);
+        vmnet_network_get_ipv4_subnet(network, &raw mut subnet_addr, &raw mut mask_addr);
     }
     let (lower, _mask, prefix) = subnet_host_order(subnet_addr, mask_addr);
     let gateway = lower | 1;

@@ -1,14 +1,11 @@
 [package]
 name = "firkin-vminitd-client"
 description = "Typed client helpers for the vminitd SandboxContext API"
-version = "0.0.1-alpha"
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
 
 [lib]
 name = "firkin_vminitd_client"
@@ -16,9 +13,9 @@ path = "src/lib.rs"
 
 [dependencies]
 bitflags.workspace = true
-firkin-oci = { path = "../oci", version = "0.0.1-alpha" }
-firkin-types = { path = "../types", version = "0.0.1-alpha" }
-firkin-vsock = { path = "../vsock", version = "0.0.1-alpha" }
+firkin-oci = { path = "../oci", version = "0.1.0" }
+firkin-types = { path = "../types", version = "0.1.0" }
+firkin-vsock = { path = "../vsock", version = "0.1.0" }
 http.workspace = true
 prost.workspace = true
 prost-types.workspace = true

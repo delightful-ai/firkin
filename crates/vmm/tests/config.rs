@@ -157,10 +157,6 @@ fn asif_disk_image_conversion_records_paths_and_format() {
 #[test]
 #[cfg(target_os = "macos")]
 fn convert_raw_disk_image_to_asif_preserves_block_contents() {
-    if !diskutil_supports_asif() {
-        eprintln!("warn: diskutil does not advertise ASIF support; skipping ASIF conversion probe");
-        return;
-    }
     let dir = tempfile::tempdir().expect("dir");
     let source = dir.path().join("source.raw");
     let asif = dir.path().join("converted.asif");
@@ -193,19 +189,6 @@ fn convert_raw_disk_image_to_asif_preserves_block_contents() {
         .unwrap_or_else(|error| panic!("read {raw_device}: {error}"));
 
     assert_eq!(&readback[..marker.len()], marker);
-}
-
-#[cfg(target_os = "macos")]
-fn diskutil_supports_asif() -> bool {
-    let Ok(output) = Command::new("diskutil")
-        .args(["image", "create", "from", "--help"])
-        .output()
-    else {
-        return false;
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    stdout.contains("ASIF") || stderr.contains("ASIF")
 }
 
 #[cfg(target_os = "macos")]

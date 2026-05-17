@@ -715,7 +715,7 @@ fn command_benchmark_samples(
     if direct_exec_request(request) {
         samples.push(
             BenchmarkSample::new(
-                "debug.exec.direct_command_start_ms",
+                "exec.direct_command_start_ms",
                 BenchmarkMetricKind::LifecycleLatency,
                 BenchmarkUnit::Milliseconds,
                 command_start_ms,
@@ -866,7 +866,7 @@ fn first_stdout_benchmark_samples(
     vec![
         first_stdout_sample,
         BenchmarkSample::new(
-            "debug.exec.direct_first_stdout_byte_ms",
+            "exec.direct_first_stdout_byte_ms",
             BenchmarkMetricKind::LifecycleLatency,
             BenchmarkUnit::Milliseconds,
             value,
@@ -880,11 +880,13 @@ fn command_event_trace_for_request(
     request: &EnvdProcessStartRequest,
     event_trace: EventTraceRecorder,
 ) -> EventTraceRecorder {
-    if !event_trace.has_recorded_events()
-        && event_trace.workload() == WorkloadClass::TinyExec
-        && shell_exec_kind(request).is_some()
-    {
-        return event_trace.with_future_workload(WorkloadClass::ShellExec);
+    if !event_trace.has_recorded_events() && event_trace.workload() == WorkloadClass::TinyExec {
+        if direct_exec_request(request) {
+            return event_trace.with_future_workload(WorkloadClass::DirectExec);
+        }
+        if shell_exec_kind(request).is_some() {
+            return event_trace.with_future_workload(WorkloadClass::ShellExec);
+        }
     }
     event_trace
 }
@@ -999,6 +1001,24 @@ mod tests {
         assert_eq!(direct_start_rpc.tag_value("cmd"), Some("/usr/bin/printf"));
         assert_eq!(direct_start_rpc.tag_value("args"), Some("ok"));
         assert_eq!(direct_start_rpc.tag_value("shell_kind"), None);
+    }
+
+    #[test]
+    fn command_event_trace_classifies_direct_tiny_exec_as_direct_exec() {
+        let request = EnvdProcessStartRequest {
+            cmd: "/usr/bin/printf".to_owned(),
+            args: vec!["ok".to_owned()],
+            ..EnvdProcessStartRequest::default()
+        };
+        let trace = EventTraceRecorder::new(
+            LifecycleClass::Hot,
+            WorkloadClass::TinyExec,
+            RuntimeProfile::FastAgent,
+        );
+
+        let trace = command_event_trace_for_request(&request, trace);
+
+        assert_eq!(trace.workload(), WorkloadClass::DirectExec);
     }
 
     #[test]

@@ -461,7 +461,7 @@ impl Default for ClientBuilder {
             cache_dir: default_cache_dir(),
             timeout: Duration::from_secs(30),
             layer_concurrency: NonZeroUsize::new(4).expect("4 is nonzero"),
-            user_agent: "firkin-oci/0.0.1-alpha".to_owned(),
+            user_agent: "firkin-oci/0.1.0".to_owned(),
         }
     }
 }

@@ -42,9 +42,8 @@ Command execution is session-owned too: `RuntimeCommandRunner` lets the adapter
 serve the local envd process start contract from the restored session and retain
 `command_start` plus `first_stdout_byte` samples.
 The first non-interactive command after a prepared-template restore also records
-`sandbox.start.resume_snapshot_to_first_stdout_ms`, which composes restore start
-through the first stdout byte while preserving the lower-level restore and
-command spans.
+`start.resume_to_first_stdout_ms`, which composes restore start through the
+first stdout byte while preserving the lower-level restore and command spans.
 Session stop is session-owned too: `RuntimeSessionStop` lets the adapter stop
 the live runtime session before releasing active capacity, and `firkin-core`
 containers implement it by signaling the init process.

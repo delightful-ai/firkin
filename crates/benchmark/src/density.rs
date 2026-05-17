@@ -6,6 +6,8 @@ use thiserror::Error as ThisError;
 
 pub const MAX_ACTIVE_BEFORE_P95_DOUBLES_METRIC: &str =
     "density.max_active_before_hot_to_first_stdout_p95_doubles";
+pub const MAX_RETAINED_SHELLS_BEFORE_FIRST_STDOUT_P95_DOUBLES_METRIC: &str =
+    "density.max_active_before_retained_shell_first_stdout_p95_doubles";
 pub const MAX_AGENT_COMPUTERS_BEFORE_READY_P95_DOUBLES_METRIC: &str =
     "density.max_agent_computers_before_ready_p95_doubles";
 pub const MAX_PRESTARTED_AGENT_SLOTS_BEFORE_CHECKOUT_READY_P95_DOUBLES_METRIC: &str =
@@ -83,6 +85,20 @@ impl DensityLimit {
             self.max_active_before_p95_doubles as f64,
         )
         .with_static_tag("source", "density-agent-computer-ready-p95-threshold")
+    }
+
+    #[must_use]
+    pub fn into_retained_shell_sample(self) -> BenchmarkSample {
+        BenchmarkSample::from_static(
+            MAX_RETAINED_SHELLS_BEFORE_FIRST_STDOUT_P95_DOUBLES_METRIC,
+            BenchmarkMetricKind::WorkloadResource,
+            BenchmarkUnit::Count,
+            self.max_active_before_p95_doubles as f64,
+        )
+        .with_static_tag(
+            "source",
+            "density-retained-shell-first-stdout-p95-threshold",
+        )
     }
 
     #[must_use]
@@ -168,6 +184,8 @@ pub fn prestarted_agent_slot_fifo_acceptance_p95_sample(
     .with_static_tag("source", "prestarted-agent-slot-fifo-acceptance-p95")
     .with_static_tag("measurement_boundary", "prestarted_slot_checkout")
     .with_static_tag("slot_surface", "prestarted_agent_slot")
+    .with_static_tag("capacity_source", "already_prestarted_slot")
+    .with_static_tag("autoscale_refill_observed", "false")
     .with_static_tag("excludes_container_add", "true")
     .with_static_tag("ready_signal", "request_fifo_acceptance")
     .with_dynamic_tag(
@@ -246,6 +264,29 @@ mod tests {
     }
 
     #[test]
+    fn emits_retained_shell_density_breakpoint_sample() {
+        let sample = max_active_before_p95_doubles([
+            DensityP95Point::new(1, 4.25),
+            DensityP95Point::new(4, 0.90),
+            DensityP95Point::new(8, 1.43),
+        ])
+        .unwrap()
+        .into_retained_shell_sample();
+
+        assert_eq!(
+            sample.metric(),
+            MAX_RETAINED_SHELLS_BEFORE_FIRST_STDOUT_P95_DOUBLES_METRIC
+        );
+        assert_eq!(sample.kind(), BenchmarkMetricKind::WorkloadResource);
+        assert_eq!(sample.unit(), BenchmarkUnit::Count);
+        assert_eq!(sample.value(), 8.0);
+        assert_eq!(
+            sample.tag_value("source"),
+            Some("density-retained-shell-first-stdout-p95-threshold")
+        );
+    }
+
+    #[test]
     fn emits_prestarted_agent_slot_density_breakpoint_sample() {
         let sample = max_active_before_p95_doubles([
             DensityP95Point::new(1, 8.0),
@@ -288,6 +329,11 @@ mod tests {
             sample.tag_value("source"),
             Some("prestarted-agent-slot-fifo-acceptance-p95")
         );
+        assert_eq!(
+            sample.tag_value("capacity_source"),
+            Some("already_prestarted_slot")
+        );
+        assert_eq!(sample.tag_value("autoscale_refill_observed"), Some("false"));
         assert_eq!(sample.tag_value("snappy_target_ms"), Some("5"));
         assert_eq!(sample.tag_value("max_concurrency_level"), Some("4"));
     }

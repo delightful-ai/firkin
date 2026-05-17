@@ -337,8 +337,116 @@ pub struct Container<S = Streams> {
     pub(crate) pid: Option<i32>,
     pub(crate) pty: Option<Pty>,
     pub(crate) runtime: Arc<Mutex<ContainerRuntime>>,
+    pub(crate) startup_timing: ContainerStartupTiming,
     pub(crate) state: PhantomData<S>,
 }
+
+/// Host-side phase timing for starting a container init process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContainerStartupTiming {
+    spec_build: Duration,
+    vminitd_connect: Duration,
+    socket_relays: Duration,
+    stdio_prepare: Duration,
+    config_write_rpc: Duration,
+    request_encode: Duration,
+    create_process_rpc: Duration,
+    start_gate_wait: Duration,
+    start_process_rpc: Duration,
+    total: Duration,
+}
+
+impl ContainerStartupTiming {
+    /// Construct host-side phase timing for a container init process start.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        spec_build: Duration,
+        vminitd_connect: Duration,
+        socket_relays: Duration,
+        stdio_prepare: Duration,
+        config_write_rpc: Duration,
+        request_encode: Duration,
+        create_process_rpc: Duration,
+        start_gate_wait: Duration,
+        start_process_rpc: Duration,
+        total: Duration,
+    ) -> Self {
+        Self {
+            spec_build,
+            vminitd_connect,
+            socket_relays,
+            stdio_prepare,
+            config_write_rpc,
+            request_encode,
+            create_process_rpc,
+            start_gate_wait,
+            start_process_rpc,
+            total,
+        }
+    }
+
+    /// Time spent building the OCI runtime spec.
+    #[must_use]
+    pub const fn spec_build(self) -> Duration {
+        self.spec_build
+    }
+
+    /// Time spent connecting to vminitd for this start operation.
+    #[must_use]
+    pub const fn vminitd_connect(self) -> Duration {
+        self.vminitd_connect
+    }
+
+    /// Time spent preparing socket relays.
+    #[must_use]
+    pub const fn socket_relays(self) -> Duration {
+        self.socket_relays
+    }
+
+    /// Time spent preparing host stdio listeners/tasks.
+    #[must_use]
+    pub const fn stdio_prepare(self) -> Duration {
+        self.stdio_prepare
+    }
+
+    /// Time spent writing the prepared container config to the guest.
+    #[must_use]
+    pub const fn config_write_rpc(self) -> Duration {
+        self.config_write_rpc
+    }
+
+    /// Time spent encoding the vminitd create-process request.
+    #[must_use]
+    pub const fn request_encode(self) -> Duration {
+        self.request_encode
+    }
+
+    /// Time spent in the vminitd create-process RPC.
+    #[must_use]
+    pub const fn create_process_rpc(self) -> Duration {
+        self.create_process_rpc
+    }
+
+    /// Time spent waiting for the optional process start gate.
+    #[must_use]
+    pub const fn start_gate_wait(self) -> Duration {
+        self.start_gate_wait
+    }
+
+    /// Time spent in the vminitd start-process RPC.
+    #[must_use]
+    pub const fn start_process_rpc(self) -> Duration {
+        self.start_process_rpc
+    }
+
+    /// Total host-side start time covered by this timing record.
+    #[must_use]
+    pub const fn total(self) -> Duration {
+        self.total
+    }
+}
+
 impl Container<Streams> {
     /// Start a builder with an implicit single-use VM.
     ///
@@ -359,6 +467,11 @@ impl<S: ContainerStdio> Container<S> {
     #[must_use]
     pub const fn pid(&self) -> Option<i32> {
         self.pid
+    }
+    /// Return host-side phase timing for this container init process start.
+    #[must_use]
+    pub const fn startup_timing(&self) -> ContainerStartupTiming {
+        self.startup_timing
     }
     /// Wait for the init process to exit.
     ///
@@ -1006,6 +1119,7 @@ async fn finish_implicit_container_start(
             socket_proxy_ids,
             exit_status: None,
         })),
+        startup_timing: ContainerStartupTiming::default(),
         state: PhantomData,
     })
 }
@@ -1080,6 +1194,7 @@ pub(crate) async fn start_implicit_container_pty(
             socket_proxy_ids,
             exit_status: None,
         })),
+        startup_timing: ContainerStartupTiming::default(),
         state: PhantomData,
     })
 }
@@ -1994,5 +2109,37 @@ pub(crate) fn vsock_runtime_error(
     move |error| Error::RuntimeOperation {
         operation,
         reason: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn container_startup_timing_preserves_all_phase_durations() {
+        let timing = ContainerStartupTiming::new(
+            Duration::from_millis(1),
+            Duration::from_millis(2),
+            Duration::from_millis(3),
+            Duration::from_millis(4),
+            Duration::from_millis(5),
+            Duration::from_millis(6),
+            Duration::from_millis(7),
+            Duration::from_millis(8),
+            Duration::from_millis(9),
+            Duration::from_millis(10),
+        );
+
+        assert_eq!(timing.spec_build(), Duration::from_millis(1));
+        assert_eq!(timing.vminitd_connect(), Duration::from_millis(2));
+        assert_eq!(timing.socket_relays(), Duration::from_millis(3));
+        assert_eq!(timing.stdio_prepare(), Duration::from_millis(4));
+        assert_eq!(timing.config_write_rpc(), Duration::from_millis(5));
+        assert_eq!(timing.request_encode(), Duration::from_millis(6));
+        assert_eq!(timing.create_process_rpc(), Duration::from_millis(7));
+        assert_eq!(timing.start_gate_wait(), Duration::from_millis(8));
+        assert_eq!(timing.start_process_rpc(), Duration::from_millis(9));
+        assert_eq!(timing.total(), Duration::from_millis(10));
     }
 }

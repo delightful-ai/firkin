@@ -824,8 +824,8 @@ fn missing_rootfs_preparation_error() -> Error {
     }
 
     Error::RuntimeArtifact {
-        operation: "resolve init.block",
-        reason: "runtime artifact preparation failed while load vminitd runtime ELFs: runtime-download builds do not embed vminitd/vmexec bytes yet".into(),
+        operation: "load vminitd runtime ELFs",
+        reason: "runtime-download builds do not embed vminitd/vmexec bytes yet".into(),
     }
 }
 

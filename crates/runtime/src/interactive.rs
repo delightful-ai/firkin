@@ -7,9 +7,9 @@ use firkin_core::{ExecConfig, Stdio};
 #[allow(unused_imports)]
 use firkin_e2b_contract::BackendError;
 #[allow(unused_imports)]
-use firkin_envd::EnvdProcessOutput;
-#[allow(unused_imports)]
 use firkin_envd::EnvdProcessStartRequest;
+#[allow(unused_imports)]
+use firkin_envd::{EnvdProcessEventStream, EnvdProcessOutput, EnvdProcessStreamEvent};
 #[allow(unused_imports)]
 use firkin_envd::{EnvdProcessInput, EnvdProcessSignal, EnvdPtySize};
 #[allow(unused_imports)]
@@ -17,7 +17,7 @@ use firkin_trace::BenchmarkSample;
 #[allow(unused_imports)]
 use firkin_trace::{BenchmarkMetricKind, BenchmarkUnit};
 #[allow(unused_imports)]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 #[allow(unused_imports)]
 use std::time::Instant;
 #[allow(unused_imports)]
@@ -29,12 +29,13 @@ use tokio::io::AsyncReadExt;
 #[allow(unused_imports)]
 use tokio::io::AsyncWriteExt;
 #[allow(unused_imports)]
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 /// Report from starting one retained interactive process in a runtime session.
 pub struct RuntimeInteractiveProcessStartReport {
     pub(crate) output: EnvdProcessOutput,
     pub(crate) benchmark_samples: Vec<BenchmarkSample>,
     pub(crate) process: Box<dyn RuntimeInteractiveProcess>,
+    pub(crate) event_stream: Option<EnvdProcessEventStream<BackendError>>,
 }
 impl RuntimeInteractiveProcessStartReport {
     /// Construct an interactive process start report.
@@ -48,7 +49,14 @@ impl RuntimeInteractiveProcessStartReport {
             output,
             benchmark_samples,
             process,
+            event_stream: None,
         }
+    }
+    /// Attach a live event stream for process stdout, stderr, or PTY output.
+    #[must_use]
+    pub fn with_event_stream(mut self, event_stream: EnvdProcessEventStream<BackendError>) -> Self {
+        self.event_stream = Some(event_stream);
+        self
     }
     /// Return benchmark samples recorded for process start.
     #[must_use]
@@ -65,6 +73,23 @@ impl RuntimeInteractiveProcessStartReport {
         Box<dyn RuntimeInteractiveProcess>,
     ) {
         (self.output, self.benchmark_samples, self.process)
+    }
+    /// Consume the report into its parts, preserving any live output stream.
+    #[must_use]
+    pub fn into_parts_with_stream(
+        self,
+    ) -> (
+        EnvdProcessOutput,
+        Vec<BenchmarkSample>,
+        Box<dyn RuntimeInteractiveProcess>,
+        Option<EnvdProcessEventStream<BackendError>>,
+    ) {
+        (
+            self.output,
+            self.benchmark_samples,
+            self.process,
+            self.event_stream,
+        )
     }
 }
 /// Retained interactive process handle for envd-compatible process operations.
@@ -110,8 +135,8 @@ struct CoreInteractiveProcess {
     pub(crate) pid: u32,
     pub(crate) process: firkin_core::Process<firkin_core::Streams>,
     pub(crate) stdin: Option<firkin_core::ChildStdin>,
-    pub(crate) stdout: Arc<Mutex<Vec<u8>>>,
-    pub(crate) stderr: Arc<Mutex<Vec<u8>>>,
+    pub(crate) stdout: Arc<StdMutex<Vec<u8>>>,
+    pub(crate) stderr: Arc<StdMutex<Vec<u8>>>,
 }
 #[async_trait]
 impl RuntimeInteractiveProcess for CoreInteractiveProcess {
@@ -125,7 +150,11 @@ impl RuntimeInteractiveProcess for CoreInteractiveProcess {
         stdin
             .write_all(&bytes)
             .await
-            .map_err(|error| BackendError::Runtime(format!("write process stdin: {error}")))
+            .map_err(|error| BackendError::Runtime(format!("write process stdin: {error}")))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|error| BackendError::Runtime(format!("flush process stdin: {error}")))
     }
     async fn close_stdin(&mut self) -> Result<(), BackendError> {
         self.stdin.take();
@@ -150,8 +179,16 @@ impl RuntimeInteractiveProcess for CoreInteractiveProcess {
     async fn connect(&mut self) -> Result<EnvdProcessOutput, BackendError> {
         Ok(EnvdProcessOutput {
             pid: self.pid,
-            stdout: self.stdout.lock().await.clone(),
-            stderr: self.stderr.lock().await.clone(),
+            stdout: self
+                .stdout
+                .lock()
+                .expect("interactive stdout buffer mutex poisoned")
+                .clone(),
+            stderr: self
+                .stderr
+                .lock()
+                .expect("interactive stderr buffer mutex poisoned")
+                .clone(),
             pty: Vec::new(),
             exit_code: 0,
             exited: false,
@@ -165,7 +202,7 @@ struct CoreInteractivePtyProcess {
     pub(crate) process: firkin_core::Process<firkin_core::Pty>,
     input: Option<firkin_core::PtyInput>,
     control: firkin_core::PtyControl,
-    pub(crate) output: Arc<Mutex<Vec<u8>>>,
+    pub(crate) output: Arc<StdMutex<Vec<u8>>>,
 }
 #[async_trait]
 impl RuntimeInteractiveProcess for CoreInteractivePtyProcess {
@@ -179,7 +216,10 @@ impl RuntimeInteractiveProcess for CoreInteractivePtyProcess {
             .ok_or_else(|| BackendError::Runtime(format!("process {} PTY is closed", self.pid)))?;
         pty.write_all(&bytes)
             .await
-            .map_err(|error| BackendError::Runtime(format!("write process pty: {error}")))
+            .map_err(|error| BackendError::Runtime(format!("write process pty: {error}")))?;
+        pty.flush()
+            .await
+            .map_err(|error| BackendError::Runtime(format!("flush process pty: {error}")))
     }
     async fn close_stdin(&mut self) -> Result<(), BackendError> {
         self.input.take();
@@ -214,7 +254,11 @@ impl RuntimeInteractiveProcess for CoreInteractivePtyProcess {
             pid: self.pid,
             stdout: Vec::new(),
             stderr: Vec::new(),
-            pty: self.output.lock().await.clone(),
+            pty: self
+                .output
+                .lock()
+                .expect("interactive pty output buffer mutex poisoned")
+                .clone(),
             exit_code: 0,
             exited: false,
             status: "running".to_owned(),
@@ -235,13 +279,22 @@ async fn start_core_interactive_streams(
         .await?;
     let pid = core_process_pid(process.pid());
     let stdin = process.take_stdin().await?;
-    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stdout = Arc::new(StdMutex::new(Vec::new()));
+    let (event_sender, event_receiver) = mpsc::channel(32);
     if let Some(stdout_stream) = process.take_stdout().await? {
-        spawn_output_capture(stdout_stream, Arc::clone(&stdout));
+        spawn_output_capture(
+            stdout_stream,
+            Arc::clone(&stdout),
+            Some((event_sender.clone(), InteractiveOutputKind::Stdout)),
+        );
     }
-    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(StdMutex::new(Vec::new()));
     if let Some(stderr_stream) = process.take_stderr().await? {
-        spawn_output_capture(stderr_stream, Arc::clone(&stderr));
+        spawn_output_capture(
+            stderr_stream,
+            Arc::clone(&stderr),
+            Some((event_sender, InteractiveOutputKind::Stderr)),
+        );
     }
     Ok(interactive_report(
         pid,
@@ -253,7 +306,8 @@ async fn start_core_interactive_streams(
             stdout,
             stderr,
         }),
-    ))
+    )
+    .with_event_stream(EnvdProcessEventStream::from_receiver(event_receiver)))
 }
 async fn start_core_interactive_pty(
     container: &mut firkin_core::Container<firkin_core::Streams>,
@@ -276,10 +330,15 @@ async fn start_core_interactive_pty(
             reason: "vminitd did not return a pty handle".to_owned(),
         });
     };
+    let (event_sender, event_receiver) = mpsc::channel(32);
     Ok(interactive_report(pid, started, {
         let (input, output_stream, control) = pty.split();
-        let output = Arc::new(Mutex::new(Vec::new()));
-        spawn_output_capture(output_stream, Arc::clone(&output));
+        let output = Arc::new(StdMutex::new(Vec::new()));
+        spawn_output_capture(
+            output_stream,
+            Arc::clone(&output),
+            Some((event_sender, InteractiveOutputKind::Pty)),
+        );
         Box::new(CoreInteractivePtyProcess {
             pid,
             process,
@@ -287,7 +346,8 @@ async fn start_core_interactive_pty(
             control,
             output,
         })
-    }))
+    })
+    .with_event_stream(EnvdProcessEventStream::from_receiver(event_receiver)))
 }
 fn interactive_exec_builder(
     request: &EnvdProcessStartRequest,
@@ -344,8 +404,20 @@ fn interactive_report(
         process,
     )
 }
-fn spawn_output_capture<R>(mut stream: R, output: Arc<Mutex<Vec<u8>>>)
-where
+#[derive(Clone, Copy)]
+enum InteractiveOutputKind {
+    Stdout,
+    Stderr,
+    Pty,
+}
+fn spawn_output_capture<R>(
+    mut stream: R,
+    output: Arc<StdMutex<Vec<u8>>>,
+    event_sender: Option<(
+        mpsc::Sender<Result<EnvdProcessStreamEvent, BackendError>>,
+        InteractiveOutputKind,
+    )>,
+) where
     R: AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
@@ -353,10 +425,37 @@ where
         loop {
             match stream.read(&mut bytes).await {
                 Ok(0) | Err(_) => break,
-                Ok(read) => output.lock().await.extend_from_slice(&bytes[..read]),
+                Ok(read) => {
+                    let chunk = bytes[..read].to_vec();
+                    output
+                        .lock()
+                        .expect("interactive output buffer mutex poisoned")
+                        .extend_from_slice(&chunk);
+                    if let Some((sender, kind)) = &event_sender {
+                        let event = match kind {
+                            InteractiveOutputKind::Stdout => EnvdProcessStreamEvent::Stdout(chunk),
+                            InteractiveOutputKind::Stderr => EnvdProcessStreamEvent::Stderr(chunk),
+                            InteractiveOutputKind::Pty => EnvdProcessStreamEvent::Pty(chunk),
+                        };
+                        send_interactive_event(sender, event).await;
+                    }
+                }
             }
         }
     });
+}
+
+async fn send_interactive_event(
+    sender: &mpsc::Sender<Result<EnvdProcessStreamEvent, BackendError>>,
+    event: EnvdProcessStreamEvent,
+) {
+    let item = Ok(event);
+    match sender.try_send(item) {
+        Err(mpsc::error::TrySendError::Full(item)) => {
+            let _ = sender.send(item).await;
+        }
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+    }
 }
 pub(crate) fn runtime_command_process_id() -> String {
     let nanos = SystemTime::now()

@@ -37,18 +37,24 @@ The scorecard requires these P0 metrics:
 
 - `start.hot_to_first_stdout_ms`
 - `start.hot_to_ready_ms`
-- `start.resume_to_first_stdout_ms`
 - `start.warm_to_first_stdout_ms`
 - `start.agent_task_ready_ms`
 - `pool.lease_ms`
-- `exec.command_start_ms`
-- `exec.first_stdout_byte_ms`
+- `exec.direct_command_start_ms`
+- `exec.direct_first_stdout_byte_ms`
 - `exec.batch_100_small_commands_ms`
-- `density.max_active_before_hot_to_first_stdout_p95_doubles`
+- `density.max_active_before_retained_shell_first_stdout_p95_doubles`
 - `disk.sparse_bloat_after_trim`
 - `disk.host_bytes_reclaimed_after_trim`
 - `cleanup.leftover_bytes`
 - `reliability.unknown_failure_rate`
+
+`start.resume_to_first_stdout_ms` remains cataloged as raw standalone snapshot
+restore guardrail telemetry. It is not a required P0 scorecard row because the
+snappy product resume path is `product.agent_computer_resume_ms`.
+`density.max_active_before_hot_to_first_stdout_p95_doubles` remains cataloged
+as hot create/start density guardrail telemetry. It is not the retained-shell
+density scorecard row.
 
 The autoscale efficiency scorecard requires:
 
@@ -59,6 +65,8 @@ The autoscale efficiency scorecard requires:
 - `autoscale.pressure_to_safe_floor_ms`
 - `autoscale.pressure_clear_to_ready_target_ms`
 - `density.max_agent_computers_before_ready_p95_doubles`
+- `density.max_prestarted_agent_slots_before_checkout_ready_p95_doubles`
+- `density.prestarted_agent_slot_fifo_acceptance_p95_ms`
 - `autoscale.active_evictions_due_to_pool_pressure`
 - `autoscale.reserve_floor_violations`
 - `cleanup.leftover_bytes`

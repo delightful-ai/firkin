@@ -201,15 +201,14 @@ impl ScorecardSnappyTargetMiss {
 
 pub const AGENT_SCORECARD_SNAPPY_TARGETS: &[ScorecardSnappyTarget] = &[
     ScorecardSnappyTarget::at_most_p95("start.hot_to_first_stdout_ms", 75.0),
-    ScorecardSnappyTarget::at_most_p95("start.resume_to_first_stdout_ms", 35.0),
     ScorecardSnappyTarget::at_most_p95("start.warm_to_first_stdout_ms", 350.0),
     ScorecardSnappyTarget::at_most_p95("start.agent_task_ready_ms", 150.0),
     ScorecardSnappyTarget::at_most_p95("pool.lease_ms", 1.0),
-    ScorecardSnappyTarget::at_most_p95("exec.command_start_ms", 20.0),
-    ScorecardSnappyTarget::at_most_p95("exec.first_stdout_byte_ms", 25.0),
+    ScorecardSnappyTarget::at_most_p95("exec.direct_command_start_ms", 20.0),
+    ScorecardSnappyTarget::at_most_p95("exec.direct_first_stdout_byte_ms", 25.0),
     ScorecardSnappyTarget::at_most_p95("exec.batch_100_small_commands_ms", 500.0),
     ScorecardSnappyTarget::at_least_p95(
-        "density.max_active_before_hot_to_first_stdout_p95_doubles",
+        "density.max_active_before_retained_shell_first_stdout_p95_doubles",
         8.0,
     ),
     ScorecardSnappyTarget::at_most_p95("disk.sparse_bloat_after_trim", 1.25),
@@ -224,14 +223,7 @@ pub const AUTOSCALE_SCORECARD_SNAPPY_TARGETS: &[ScorecardSnappyTarget] = &[
     ScorecardSnappyTarget::at_least_p95("autoscale.safe_spare_limiting_utilization_pct", 70.0),
     ScorecardSnappyTarget::at_most_p95("autoscale.pressure_to_safe_floor_ms", 5_000.0),
     ScorecardSnappyTarget::at_most_p95("autoscale.pressure_clear_to_ready_target_ms", 10_000.0),
-    ScorecardSnappyTarget::at_least_p95(
-        "density.max_agent_computers_before_ready_p95_doubles",
-        4.0,
-    ),
-    ScorecardSnappyTarget::at_least_p95(
-        "density.max_prestarted_agent_slots_before_checkout_ready_p95_doubles",
-        4.0,
-    ),
+    ScorecardSnappyTarget::at_most_p95("density.prestarted_agent_slot_fifo_acceptance_p95_ms", 5.0),
     ScorecardSnappyTarget::at_most_p95("autoscale.active_evictions_due_to_pool_pressure", 0.0),
     ScorecardSnappyTarget::at_most_p95("autoscale.reserve_floor_violations", 0.0),
     ScorecardSnappyTarget::at_most_p95("cleanup.leftover_bytes", 0.0),
@@ -241,13 +233,60 @@ pub const AUTOSCALE_SCORECARD_SNAPPY_TARGETS: &[ScorecardSnappyTarget] = &[
 pub const AGENT_COMPUTER_SCORECARD_SNAPPY_TARGETS: &[ScorecardSnappyTarget] = &[
     ScorecardSnappyTarget::at_most_p95("product.agent_computer_ready_ms", 250.0),
     ScorecardSnappyTarget::at_most_p95("product.agent_computer_resume_ms", 75.0),
-    ScorecardSnappyTarget::at_least_p95(
-        "density.max_agent_computers_before_ready_p95_doubles",
-        4.0,
-    ),
     ScorecardSnappyTarget::at_most_p95("cleanup.leftover_bytes", 0.0),
     ScorecardSnappyTarget::at_most_p95("reliability.unknown_failure_rate", 0.0),
 ];
+
+const PRODUCT_DENSITY_CAPACITY_TIERS: &[ProductDensityCapacityTier] = &[
+    ProductDensityCapacityTier::new(4, 125.0, "snappy_4"),
+    ProductDensityCapacityTier::new(8, 250.0, "snappy_8"),
+    ProductDensityCapacityTier::new(16, 500.0, "degraded_16"),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ProductDensityCapacityTier {
+    concurrency: u64,
+    max_ready_ms: f64,
+    tier: &'static str,
+}
+
+impl ProductDensityCapacityTier {
+    const fn new(concurrency: u64, max_ready_ms: f64, tier: &'static str) -> Self {
+        Self {
+            concurrency,
+            max_ready_ms,
+            tier,
+        }
+    }
+
+    fn metric(self) -> String {
+        format!(
+            "debug.product.agent_computer_ready_deck_c{}_ms",
+            self.concurrency
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProductDensityPromotionBlocker {
+    metric: String,
+    blocker: String,
+    next_action: String,
+}
+
+impl ProductDensityPromotionBlocker {
+    fn new(
+        metric: impl Into<String>,
+        blocker: impl Into<String>,
+        next_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            metric: metric.into(),
+            blocker: blocker.into(),
+            next_action: next_action.into(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct AgentBenchmarkScorecardReport {
@@ -722,6 +761,18 @@ fn agent_computer_promotion_blockers(
     grouped: &BTreeMap<String, Vec<BenchmarkSample>>,
 ) -> Vec<AgentComputerScorecardPromotionBlocker> {
     let mut blockers = Vec::new();
+    blockers.extend(
+        product_density_trust_blockers(grouped)
+            .into_iter()
+            .chain(product_density_capacity_tier_blockers(grouped))
+            .map(|blocker| {
+                AgentComputerScorecardPromotionBlocker::new(
+                    blocker.metric,
+                    blocker.blocker,
+                    blocker.next_action,
+                )
+            }),
+    );
     if grouped
         .get("product.database_ready_ms")
         .into_iter()
@@ -773,7 +824,7 @@ fn scorecard_snappy_target_misses(
 fn autoscale_promotion_blockers(
     grouped: &BTreeMap<String, Vec<BenchmarkSample>>,
 ) -> Vec<AutoscaleScorecardPromotionBlocker> {
-    autoscale_efficiency_measurement_coverage()
+    let mut blockers = autoscale_efficiency_measurement_coverage()
         .iter()
         .filter(|coverage| {
             coverage.status != BenchmarkMeasurementStatus::SignedLiveExact
@@ -792,7 +843,19 @@ fn autoscale_promotion_blockers(
                 ),
             )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    blockers.extend(
+        product_density_capacity_tier_blockers(grouped)
+            .into_iter()
+            .map(|blocker| {
+                AutoscaleScorecardPromotionBlocker::new(
+                    blocker.metric,
+                    blocker.blocker,
+                    blocker.next_action,
+                )
+            }),
+    );
+    blockers
 }
 
 fn autoscale_metric_has_promotable_samples(
@@ -826,7 +889,7 @@ fn autoscale_sample_promotes_metric(metric: &str, sample: &BenchmarkSample) -> b
                     == Some("runtime_active_pod_registry_budget")
                 && sample.tag_value("reserved_floor_source") == Some("runtime_reserve_floor_config")
                 && sample.tag_value("ready_queue_resource_source")
-                    == Some("observed_ready_hit_budget")
+                    == Some("observed_ready_queue_capacity_budget")
                 && sample.tag_value("resource_accounting_scope")
                     == Some("agent_computer_scorecard_harness_observation")
                 && sample.tag_value("limiting_resource").is_some()
@@ -855,6 +918,17 @@ fn autoscale_sample_promotes_metric(metric: &str, sample: &BenchmarkSample) -> b
                 && sample.tag_value("ready_signal") == Some("request_fifo_acceptance")
                 && sample.tag_value("output_wait_preserved") == Some("true")
         }
+        "density.prestarted_agent_slot_fifo_acceptance_p95_ms" => {
+            sample.tag_value("source") == Some("prestarted-agent-slot-fifo-acceptance-p95")
+                && sample.tag_value("measurement_boundary") == Some("prestarted_slot_checkout")
+                && sample.tag_value("slot_surface") == Some("prestarted_agent_slot")
+                && sample.tag_value("capacity_source") == Some("already_prestarted_slot")
+                && sample.tag_value("autoscale_refill_observed") == Some("false")
+                && sample.tag_value("excludes_container_add") == Some("true")
+                && sample.tag_value("ready_signal") == Some("request_fifo_acceptance")
+                && sample.tag_value("output_wait_preserved") == Some("true")
+                && sample.tag_value("max_concurrency_level").is_some()
+        }
         "autoscale.active_evictions_due_to_pool_pressure"
         | "autoscale.reserve_floor_violations" => {
             sample.tag_value("source") == Some("autoscale-protection-counts")
@@ -862,8 +936,10 @@ fn autoscale_sample_promotes_metric(metric: &str, sample: &BenchmarkSample) -> b
                 && sample.tag_value("eviction_scope") == Some("active_session_protection")
                 && sample.tag_value("reserve_scope") == Some("configured_runtime_floor")
                 && sample.tag_value("pressure_policy") == Some("no_pool_comfort_eviction")
+                && sample.tag_value("pressure_stress_observed") == Some("true")
+                && sample.tag_value("protection_evidence_scope") == Some("pressure_stress")
                 && sample.tag_value("protection_count_source")
-                    == Some("observed_harness_completion")
+                    == Some("observed_pressure_scenario_completion")
         }
         "autoscale.pressure_to_safe_floor_ms" => {
             sample.tag_value("trust") == Some("exact_host_event_pair")
@@ -871,6 +947,8 @@ fn autoscale_sample_promotes_metric(metric: &str, sample: &BenchmarkSample) -> b
                     == Some("signed_live_autoscale_scenario")
                 && sample.tag_value("pressure_source") == Some("runtime_pressure_signal")
                 && sample.tag_value("safe_floor_source") == Some("runtime_reserve_floor_probe")
+                && sample.tag_value("pressure_transition") == Some("violated_to_satisfied")
+                && sample.tag_value("autoscale_work_observed") == Some("capacity_reclaimed")
                 && sample.tag_value("start_event") == Some("PressureDetected")
                 && sample.tag_value("end_event") == Some("SafeFloorRestored")
         }
@@ -880,6 +958,10 @@ fn autoscale_sample_promotes_metric(metric: &str, sample: &BenchmarkSample) -> b
                     == Some("signed_live_autoscale_scenario")
                 && sample.tag_value("pressure_clear_source") == Some("runtime_pressure_signal")
                 && sample.tag_value("ready_target_source") == Some("runtime_ready_queue_probe")
+                && sample.tag_value("ready_queue_transition") == Some("drained_to_target")
+                && sample.tag_value("autoscale_work_observed") == Some("ready_capacity_refilled")
+                && sample.tag_value("refill_setup_excluded") == Some("true")
+                && sample.tag_value("ready_queue_prepared_before_pressure_clear") == Some("true")
                 && sample.tag_value("start_event") == Some("SafeFloorRestored")
                 && sample.tag_value("end_event") == Some("ReadyTargetRestored")
         }
@@ -1012,6 +1094,86 @@ impl AgentComputerScorecardArtifact {
     }
 }
 
+fn product_density_trust_blockers(
+    grouped: &BTreeMap<String, Vec<BenchmarkSample>>,
+) -> Vec<ProductDensityPromotionBlocker> {
+    let metric = "density.max_agent_computers_before_ready_p95_doubles";
+    if autoscale_metric_has_promotable_samples(grouped, metric) {
+        return Vec::new();
+    }
+
+    vec![ProductDensityPromotionBlocker::new(
+        metric,
+        "product density lacks signed-live browser + database + CLI add/start readiness boundaries",
+        "tag density.max_agent_computers_before_ready_p95_doubles with product_path/product_pod_ready_deck boundaries only after the density sweep gates on AgentComputerReady",
+    )]
+}
+
+fn product_density_capacity_tier_blockers(
+    grouped: &BTreeMap<String, Vec<BenchmarkSample>>,
+) -> Vec<ProductDensityPromotionBlocker> {
+    let metric = "density.max_agent_computers_before_ready_p95_doubles";
+    if !autoscale_metric_has_promotable_samples(grouped, metric) {
+        return Vec::new();
+    }
+
+    let mut blockers = Vec::new();
+    for tier in PRODUCT_DENSITY_CAPACITY_TIERS {
+        let capacity_metric = tier.metric();
+        let Some(samples) = grouped.get(&capacity_metric) else {
+            blockers.push(ProductDensityPromotionBlocker::new(
+                metric,
+                format!(
+                    "product density is missing c{} ready-deck capacity tier evidence",
+                    tier.concurrency
+                ),
+                format!(
+                    "emit {} with measurement_boundary=product_path_density_level and density_tier={}",
+                    capacity_metric, tier.tier
+                ),
+            ));
+            continue;
+        };
+
+        if samples
+            .iter()
+            .any(|sample| !product_density_capacity_tier_sample_passes(*tier, sample))
+        {
+            blockers.push(ProductDensityPromotionBlocker::new(
+                metric,
+                format!(
+                    "product density c{} ready-deck p95 misses the {}ms {} tier or lacks product-path tags",
+                    tier.concurrency, tier.max_ready_ms, tier.tier
+                ),
+                format!(
+                    "reduce product add/start contention until {} reports capacity_status=pass",
+                    capacity_metric
+                ),
+            ));
+        }
+    }
+    blockers
+}
+
+fn product_density_capacity_tier_sample_passes(
+    tier: ProductDensityCapacityTier,
+    sample: &BenchmarkSample,
+) -> bool {
+    sample.kind() == BenchmarkMetricKind::LifecycleLatency
+        && sample.unit() == BenchmarkUnit::Milliseconds
+        && sample.value() <= tier.max_ready_ms
+        && sample.tag_value("measurement_boundary") == Some("product_path_density_level")
+        && sample.tag_value("probe_surface") == Some("browser_db_cli_readiness")
+        && sample.tag_value("cli_boundary") == Some("real_cli")
+        && sample.tag_value("browser_boundary") == Some("real_browser_sidecar")
+        && sample.tag_value("database_boundary") == Some("real_db_sidecar")
+        && sample.tag_value("pod_surface") == Some("product_pod_ready_deck")
+        && sample.tag_value("excludes_container_add") == Some("false")
+        && sample.tag_value("ready_signal") == Some("agent_computer_ready_after_container_add")
+        && sample.tag_value("density_tier") == Some(tier.tier)
+        && sample.tag_value("capacity_status") == Some("pass")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1044,7 +1206,7 @@ mod tests {
         values: impl IntoIterator<Item = f64>,
     ) -> Vec<BenchmarkSample> {
         let values = values.into_iter().collect::<Vec<_>>();
-        required_agent_computer_metric_definitions()
+        let mut samples = required_agent_computer_metric_definitions()
             .into_iter()
             .flat_map(|definition| {
                 values.iter().copied().map(move |value| {
@@ -1061,11 +1223,24 @@ mod tests {
                                 .with_static_tag("browser_boundary", "real_browser_sidecar")
                                 .with_static_tag("database_boundary", "real_db_sidecar")
                         }
+                        "density.max_agent_computers_before_ready_p95_doubles" => sample
+                            .with_static_tag("measurement_boundary", "product_path")
+                            .with_static_tag("pod_surface", "product_pod_ready_deck")
+                            .with_static_tag("excludes_container_add", "false")
+                            .with_static_tag(
+                                "ready_signal",
+                                "agent_computer_ready_after_container_add",
+                            )
+                            .with_static_tag("cli_boundary", "real_cli")
+                            .with_static_tag("browser_boundary", "real_browser_sidecar")
+                            .with_static_tag("database_boundary", "real_db_sidecar"),
                         _ => sample,
                     }
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        samples.extend(promotable_product_density_capacity_tier_samples());
+        samples
     }
 
     fn proxy_database_ready_samples(values: impl IntoIterator<Item = f64>) -> Vec<BenchmarkSample> {
@@ -1133,6 +1308,46 @@ mod tests {
             .collect()
     }
 
+    fn promotable_product_density_capacity_tier_samples() -> Vec<BenchmarkSample> {
+        [
+            (
+                "debug.product.agent_computer_ready_deck_c4_ms",
+                110.0,
+                "snappy_4",
+            ),
+            (
+                "debug.product.agent_computer_ready_deck_c8_ms",
+                225.0,
+                "snappy_8",
+            ),
+            (
+                "debug.product.agent_computer_ready_deck_c16_ms",
+                450.0,
+                "degraded_16",
+            ),
+        ]
+        .into_iter()
+        .map(|(metric, value, tier)| {
+            BenchmarkSample::new(
+                metric,
+                BenchmarkMetricKind::LifecycleLatency,
+                BenchmarkUnit::Milliseconds,
+                value,
+            )
+            .with_static_tag("probe_surface", "browser_db_cli_readiness")
+            .with_static_tag("measurement_boundary", "product_path_density_level")
+            .with_static_tag("cli_boundary", "real_cli")
+            .with_static_tag("browser_boundary", "real_browser_sidecar")
+            .with_static_tag("database_boundary", "real_db_sidecar")
+            .with_static_tag("pod_surface", "product_pod_ready_deck")
+            .with_static_tag("excludes_container_add", "false")
+            .with_static_tag("ready_signal", "agent_computer_ready_after_container_add")
+            .with_static_tag("density_tier", tier)
+            .with_static_tag("capacity_status", "pass")
+        })
+        .collect()
+    }
+
     fn promotable_ready_queue_samples(
         values: impl IntoIterator<Item = f64>,
     ) -> Vec<BenchmarkSample> {
@@ -1174,7 +1389,10 @@ mod tests {
                     "runtime_active_pod_registry_budget",
                 )
                 .with_static_tag("reserved_floor_source", "runtime_reserve_floor_config")
-                .with_static_tag("ready_queue_resource_source", "observed_ready_hit_budget")
+                .with_static_tag(
+                    "ready_queue_resource_source",
+                    "observed_ready_queue_capacity_budget",
+                )
                 .with_static_tag(
                     "resource_accounting_scope",
                     "agent_computer_scorecard_harness_observation",
@@ -1202,12 +1420,55 @@ mod tests {
                 .with_static_tag("eviction_scope", "active_session_protection")
                 .with_static_tag("reserve_scope", "configured_runtime_floor")
                 .with_static_tag("pressure_policy", "no_pool_comfort_eviction")
-                .with_static_tag("protection_count_source", "observed_harness_completion")
+                .with_static_tag("pressure_stress_observed", "true")
+                .with_static_tag("protection_evidence_scope", "pressure_stress")
+                .with_static_tag(
+                    "protection_count_source",
+                    "observed_pressure_scenario_completion",
+                )
             })
             .collect()
     }
 
     fn promotable_pressure_samples(
+        metric: &'static str,
+        start_event: &'static str,
+        end_event: &'static str,
+        values: impl IntoIterator<Item = f64>,
+    ) -> Vec<BenchmarkSample> {
+        values
+            .into_iter()
+            .map(|value| {
+                let sample = BenchmarkSample::new(
+                    metric,
+                    BenchmarkMetricKind::LifecycleLatency,
+                    BenchmarkUnit::Milliseconds,
+                    value,
+                )
+                .with_static_tag("trust", "exact_host_event_pair")
+                .with_static_tag("measurement_boundary", "signed_live_autoscale_scenario")
+                .with_static_tag("start_event", start_event)
+                .with_static_tag("end_event", end_event);
+                match metric {
+                    "autoscale.pressure_to_safe_floor_ms" => sample
+                        .with_static_tag("pressure_source", "runtime_pressure_signal")
+                        .with_static_tag("safe_floor_source", "runtime_reserve_floor_probe")
+                        .with_static_tag("pressure_transition", "violated_to_satisfied")
+                        .with_static_tag("autoscale_work_observed", "capacity_reclaimed"),
+                    "autoscale.pressure_clear_to_ready_target_ms" => sample
+                        .with_static_tag("pressure_clear_source", "runtime_pressure_signal")
+                        .with_static_tag("ready_target_source", "runtime_ready_queue_probe")
+                        .with_static_tag("ready_queue_transition", "drained_to_target")
+                        .with_static_tag("autoscale_work_observed", "ready_capacity_refilled")
+                        .with_static_tag("refill_setup_excluded", "true")
+                        .with_static_tag("ready_queue_prepared_before_pressure_clear", "true"),
+                    _ => sample,
+                }
+            })
+            .collect()
+    }
+
+    fn labeled_probe_pressure_samples(
         metric: &'static str,
         start_event: &'static str,
         end_event: &'static str,
@@ -1239,6 +1500,30 @@ mod tests {
             .collect()
     }
 
+    fn refill_samples_without_setup_boundary_tags(
+        values: impl IntoIterator<Item = f64>,
+    ) -> Vec<BenchmarkSample> {
+        values
+            .into_iter()
+            .map(|value| {
+                BenchmarkSample::new(
+                    "autoscale.pressure_clear_to_ready_target_ms",
+                    BenchmarkMetricKind::LifecycleLatency,
+                    BenchmarkUnit::Milliseconds,
+                    value,
+                )
+                .with_static_tag("trust", "exact_host_event_pair")
+                .with_static_tag("measurement_boundary", "signed_live_autoscale_scenario")
+                .with_static_tag("start_event", "SafeFloorRestored")
+                .with_static_tag("end_event", "ReadyTargetRestored")
+                .with_static_tag("pressure_clear_source", "runtime_pressure_signal")
+                .with_static_tag("ready_target_source", "runtime_ready_queue_probe")
+                .with_static_tag("ready_queue_transition", "drained_to_target")
+                .with_static_tag("autoscale_work_observed", "ready_capacity_refilled")
+            })
+            .collect()
+    }
+
     fn promotable_prestarted_agent_slot_density_samples(
         values: impl IntoIterator<Item = f64>,
     ) -> Vec<BenchmarkSample> {
@@ -1256,6 +1541,31 @@ mod tests {
                 .with_static_tag("excludes_container_add", "true")
                 .with_static_tag("ready_signal", "request_fifo_acceptance")
                 .with_static_tag("output_wait_preserved", "true")
+            })
+            .collect()
+    }
+
+    fn promotable_prestarted_agent_slot_fifo_acceptance_samples(
+        values: impl IntoIterator<Item = f64>,
+    ) -> Vec<BenchmarkSample> {
+        values
+            .into_iter()
+            .map(|value| {
+                BenchmarkSample::new(
+                    "density.prestarted_agent_slot_fifo_acceptance_p95_ms",
+                    BenchmarkMetricKind::LifecycleLatency,
+                    BenchmarkUnit::Milliseconds,
+                    value,
+                )
+                .with_static_tag("source", "prestarted-agent-slot-fifo-acceptance-p95")
+                .with_static_tag("measurement_boundary", "prestarted_slot_checkout")
+                .with_static_tag("slot_surface", "prestarted_agent_slot")
+                .with_static_tag("capacity_source", "already_prestarted_slot")
+                .with_static_tag("autoscale_refill_observed", "false")
+                .with_static_tag("excludes_container_add", "true")
+                .with_static_tag("ready_signal", "request_fifo_acceptance")
+                .with_static_tag("output_wait_preserved", "true")
+                .with_dynamic_tag("max_concurrency_level", "4")
             })
             .collect()
     }
@@ -1280,10 +1590,30 @@ mod tests {
     }
 
     #[test]
+    fn scorecard_gates_retained_shell_density_not_hot_create_density() {
+        assert!(
+            P0_SCORECARD_METRICS
+                .contains(&"density.max_active_before_retained_shell_first_stdout_p95_doubles")
+        );
+        assert!(
+            !P0_SCORECARD_METRICS
+                .contains(&"density.max_active_before_hot_to_first_stdout_p95_doubles")
+        );
+        assert!(AGENT_SCORECARD_SNAPPY_TARGETS.iter().any(|target| {
+            target.metric() == "density.max_active_before_retained_shell_first_stdout_p95_doubles"
+                && target.direction() == ScorecardSnappyTargetDirection::AtLeast
+                && (target.p95_threshold() - 8.0).abs() < f64::EPSILON
+        }));
+        assert!(!AGENT_SCORECARD_SNAPPY_TARGETS.iter().any(|target| {
+            target.metric() == "density.max_active_before_hot_to_first_stdout_p95_doubles"
+        }));
+    }
+
+    #[test]
     fn scorecard_rejects_missing_required_metric() {
         let samples = scorecard_samples([1.0])
             .into_iter()
-            .filter(|sample| sample.metric() != "exec.command_start_ms")
+            .filter(|sample| sample.metric() != "exec.direct_command_start_ms")
             .collect::<Vec<_>>();
 
         let error =
@@ -1292,7 +1622,7 @@ mod tests {
         assert!(matches!(
             error,
             AgentBenchmarkScorecardError::MissingRequiredMetric { metric }
-            if metric == "exec.command_start_ms"
+            if metric == "exec.direct_command_start_ms"
         ));
     }
 
@@ -1300,7 +1630,7 @@ mod tests {
     fn scorecard_rejects_wrong_required_metric_shape() {
         let mut samples = scorecard_samples([1.0]);
         samples.push(BenchmarkSample::new(
-            "exec.command_start_ms",
+            "exec.direct_command_start_ms",
             BenchmarkMetricKind::WorkloadResource,
             BenchmarkUnit::Bytes,
             1.0,
@@ -1311,7 +1641,7 @@ mod tests {
         assert!(matches!(
             error,
             AgentBenchmarkScorecardError::WrongRequiredMetricShape { metric, .. }
-            if metric == "exec.command_start_ms"
+            if metric == "exec.direct_command_start_ms"
         ));
     }
 
@@ -1343,6 +1673,36 @@ mod tests {
                 && (miss.p95_threshold() - 75.0).abs() < f64::EPSILON
                 && (miss.actual_p95() - 100.0).abs() < f64::EPSILON
         }));
+    }
+
+    #[test]
+    fn scorecard_does_not_gate_raw_standalone_snapshot_resume() {
+        let mut samples = scorecard_samples([1.0])
+            .into_iter()
+            .filter(|sample| sample.metric() != "start.resume_to_first_stdout_ms")
+            .collect::<Vec<_>>();
+        samples.push(BenchmarkSample::new(
+            "start.resume_to_first_stdout_ms",
+            BenchmarkMetricKind::LifecycleLatency,
+            BenchmarkUnit::Milliseconds,
+            220.0,
+        ));
+
+        let report = AgentBenchmarkScorecardReport::from_samples(samples)
+            .expect("raw snapshot restore should not be required");
+
+        assert!(
+            report
+                .summary_for("start.resume_to_first_stdout_ms")
+                .is_none(),
+            "raw snapshot restore should remain guardrail telemetry, not a required scorecard row"
+        );
+        assert!(
+            !report
+                .snappy_target_misses()
+                .iter()
+                .any(|miss| miss.metric() == "start.resume_to_first_stdout_ms")
+        );
     }
 
     #[test]
@@ -1560,6 +1920,7 @@ mod tests {
         samples.extend(promotable_product_density_samples(
             (1..=100_u32).map(f64::from),
         ));
+        samples.extend(promotable_product_density_capacity_tier_samples());
 
         let report = AutoscaleEfficiencyScorecardReport::from_samples(samples)
             .expect("autoscale scorecard report");
@@ -1570,6 +1931,80 @@ mod tests {
                 .iter()
                 .all(|blocker| blocker.metric()
                     != "density.max_agent_computers_before_ready_p95_doubles")
+        );
+    }
+
+    #[test]
+    fn autoscale_scorecard_blocks_product_density_without_capacity_tier_samples() {
+        let mut samples = autoscale_scorecard_samples((1..=100_u32).map(f64::from))
+            .into_iter()
+            .filter(|sample| {
+                sample.metric() != "density.max_agent_computers_before_ready_p95_doubles"
+            })
+            .collect::<Vec<_>>();
+        samples.extend(promotable_product_density_samples(
+            (1..=100_u32).map(f64::from),
+        ));
+
+        let report = AutoscaleEfficiencyScorecardReport::from_samples(samples)
+            .expect("autoscale scorecard report");
+
+        assert!(
+            report
+                .promotion_blockers()
+                .iter()
+                .any(|blocker| blocker.metric()
+                    == "density.max_agent_computers_before_ready_p95_doubles"
+                    && blocker.blocker().contains("missing c4"))
+        );
+    }
+
+    #[test]
+    fn autoscale_scorecard_blocks_product_density_capacity_tier_miss() {
+        let mut samples = autoscale_scorecard_samples((1..=100_u32).map(f64::from))
+            .into_iter()
+            .filter(|sample| {
+                sample.metric() != "density.max_agent_computers_before_ready_p95_doubles"
+            })
+            .collect::<Vec<_>>();
+        samples.extend(promotable_product_density_samples(
+            (1..=100_u32).map(f64::from),
+        ));
+        samples.extend(
+            promotable_product_density_capacity_tier_samples()
+                .into_iter()
+                .map(|sample| {
+                    if sample.metric() == "debug.product.agent_computer_ready_deck_c8_ms" {
+                        BenchmarkSample::new(sample.metric(), sample.kind(), sample.unit(), 275.0)
+                            .with_static_tag("probe_surface", "browser_db_cli_readiness")
+                            .with_static_tag("measurement_boundary", "product_path_density_level")
+                            .with_static_tag("cli_boundary", "real_cli")
+                            .with_static_tag("browser_boundary", "real_browser_sidecar")
+                            .with_static_tag("database_boundary", "real_db_sidecar")
+                            .with_static_tag("pod_surface", "product_pod_ready_deck")
+                            .with_static_tag("excludes_container_add", "false")
+                            .with_static_tag(
+                                "ready_signal",
+                                "agent_computer_ready_after_container_add",
+                            )
+                            .with_static_tag("density_tier", "snappy_8")
+                            .with_static_tag("capacity_status", "miss")
+                    } else {
+                        sample
+                    }
+                }),
+        );
+
+        let report = AutoscaleEfficiencyScorecardReport::from_samples(samples)
+            .expect("autoscale scorecard report");
+
+        assert!(
+            report
+                .promotion_blockers()
+                .iter()
+                .any(|blocker| blocker.metric()
+                    == "density.max_agent_computers_before_ready_p95_doubles"
+                    && blocker.blocker().contains("c8"))
         );
     }
 
@@ -1655,6 +2090,66 @@ mod tests {
     }
 
     #[test]
+    fn autoscale_scorecard_unblocks_real_prestarted_agent_slot_fifo_samples() {
+        let mut samples = autoscale_scorecard_samples((1..=100_u32).map(f64::from))
+            .into_iter()
+            .filter(|sample| {
+                sample.metric() != "density.prestarted_agent_slot_fifo_acceptance_p95_ms"
+            })
+            .collect::<Vec<_>>();
+        samples.extend(promotable_prestarted_agent_slot_fifo_acceptance_samples(
+            (1..=100_u32).map(f64::from),
+        ));
+
+        let report = AutoscaleEfficiencyScorecardReport::from_samples(samples)
+            .expect("autoscale scorecard report");
+
+        assert!(
+            report
+                .promotion_blockers()
+                .iter()
+                .all(|blocker| blocker.metric()
+                    != "density.prestarted_agent_slot_fifo_acceptance_p95_ms")
+        );
+    }
+
+    #[test]
+    fn autoscale_scorecard_blocks_fifo_samples_without_explicit_non_refill_scope() {
+        let mut samples = autoscale_scorecard_samples((1..=100_u32).map(f64::from))
+            .into_iter()
+            .filter(|sample| {
+                sample.metric() != "density.prestarted_agent_slot_fifo_acceptance_p95_ms"
+            })
+            .collect::<Vec<_>>();
+        samples.extend((1..=100_u32).map(|value| {
+            BenchmarkSample::new(
+                "density.prestarted_agent_slot_fifo_acceptance_p95_ms",
+                BenchmarkMetricKind::LifecycleLatency,
+                BenchmarkUnit::Milliseconds,
+                f64::from(value),
+            )
+            .with_static_tag("source", "prestarted-agent-slot-fifo-acceptance-p95")
+            .with_static_tag("measurement_boundary", "prestarted_slot_checkout")
+            .with_static_tag("slot_surface", "prestarted_agent_slot")
+            .with_static_tag("excludes_container_add", "true")
+            .with_static_tag("ready_signal", "request_fifo_acceptance")
+            .with_static_tag("output_wait_preserved", "true")
+            .with_dynamic_tag("max_concurrency_level", "4")
+        }));
+
+        let report = AutoscaleEfficiencyScorecardReport::from_samples(samples)
+            .expect("autoscale scorecard report");
+
+        assert!(
+            report
+                .promotion_blockers()
+                .iter()
+                .any(|blocker| blocker.metric()
+                    == "density.prestarted_agent_slot_fifo_acceptance_p95_ms")
+        );
+    }
+
+    #[test]
     fn autoscale_scorecard_unblocks_signed_live_protection_samples() {
         let mut samples = autoscale_scorecard_samples((1..=100_u32).map(f64::from))
             .into_iter()
@@ -1682,6 +2177,53 @@ mod tests {
                 .all(|blocker| blocker.metric()
                     != "autoscale.active_evictions_due_to_pool_pressure"
                     && blocker.metric() != "autoscale.reserve_floor_violations")
+        );
+    }
+
+    #[test]
+    fn autoscale_scorecard_blocks_clean_run_protection_guardrails_as_stress_proof() {
+        let mut samples = autoscale_scorecard_samples((1..=100_u32).map(f64::from))
+            .into_iter()
+            .filter(|sample| {
+                sample.metric() != "autoscale.active_evictions_due_to_pool_pressure"
+                    && sample.metric() != "autoscale.reserve_floor_violations"
+            })
+            .collect::<Vec<_>>();
+        for metric in [
+            "autoscale.active_evictions_due_to_pool_pressure",
+            "autoscale.reserve_floor_violations",
+        ] {
+            samples.extend((1..=100_u32).map(|value| {
+                BenchmarkSample::new(
+                    metric,
+                    BenchmarkMetricKind::WorkloadResource,
+                    BenchmarkUnit::Count,
+                    f64::from(value),
+                )
+                .with_static_tag("source", "autoscale-protection-counts")
+                .with_static_tag("measurement_boundary", "signed_live_product_path")
+                .with_static_tag("eviction_scope", "active_session_protection")
+                .with_static_tag("reserve_scope", "configured_runtime_floor")
+                .with_static_tag("pressure_policy", "no_pool_comfort_eviction")
+                .with_static_tag("pressure_stress_observed", "false")
+                .with_static_tag("protection_evidence_scope", "clean_run_guardrail")
+                .with_static_tag("protection_count_source", "observed_harness_completion")
+            }));
+        }
+
+        let report = AutoscaleEfficiencyScorecardReport::from_samples(samples)
+            .expect("autoscale scorecard report");
+
+        assert!(
+            report.promotion_blockers().iter().any(
+                |blocker| blocker.metric() == "autoscale.active_evictions_due_to_pool_pressure"
+            )
+        );
+        assert!(
+            report
+                .promotion_blockers()
+                .iter()
+                .any(|blocker| blocker.metric() == "autoscale.reserve_floor_violations")
         );
     }
 
@@ -1778,6 +2320,66 @@ mod tests {
                 .iter()
                 .any(|blocker| blocker.metric() == "autoscale.pressure_to_safe_floor_ms")
         );
+        assert!(
+            report
+                .promotion_blockers()
+                .iter()
+                .any(|blocker| blocker.metric() == "autoscale.pressure_clear_to_ready_target_ms")
+        );
+    }
+
+    #[test]
+    fn autoscale_scorecard_keeps_labeled_pressure_probes_blocked_without_observed_work() {
+        let mut samples = autoscale_scorecard_samples((1..=100_u32).map(f64::from))
+            .into_iter()
+            .filter(|sample| {
+                sample.metric() != "autoscale.pressure_to_safe_floor_ms"
+                    && sample.metric() != "autoscale.pressure_clear_to_ready_target_ms"
+            })
+            .collect::<Vec<_>>();
+        samples.extend(labeled_probe_pressure_samples(
+            "autoscale.pressure_to_safe_floor_ms",
+            "PressureDetected",
+            "SafeFloorRestored",
+            (1..=100_u32).map(f64::from),
+        ));
+        samples.extend(labeled_probe_pressure_samples(
+            "autoscale.pressure_clear_to_ready_target_ms",
+            "SafeFloorRestored",
+            "ReadyTargetRestored",
+            (1..=100_u32).map(f64::from),
+        ));
+
+        let report = AutoscaleEfficiencyScorecardReport::from_samples(samples)
+            .expect("autoscale scorecard report");
+
+        assert!(
+            report
+                .promotion_blockers()
+                .iter()
+                .any(|blocker| blocker.metric() == "autoscale.pressure_to_safe_floor_ms")
+        );
+        assert!(
+            report
+                .promotion_blockers()
+                .iter()
+                .any(|blocker| blocker.metric() == "autoscale.pressure_clear_to_ready_target_ms")
+        );
+    }
+
+    #[test]
+    fn autoscale_scorecard_blocks_refill_samples_that_include_setup_boundary() {
+        let mut samples = autoscale_scorecard_samples((1..=100_u32).map(f64::from))
+            .into_iter()
+            .filter(|sample| sample.metric() != "autoscale.pressure_clear_to_ready_target_ms")
+            .collect::<Vec<_>>();
+        samples.extend(refill_samples_without_setup_boundary_tags(
+            (1..=100_u32).map(f64::from),
+        ));
+
+        let report = AutoscaleEfficiencyScorecardReport::from_samples(samples)
+            .expect("autoscale scorecard report");
+
         assert!(
             report
                 .promotion_blockers()
@@ -2023,6 +2625,56 @@ mod tests {
                 .promotion_blockers()
                 .iter()
                 .any(|blocker| blocker.metric() == "product.agent_computer_resume_ms")
+        );
+    }
+
+    #[test]
+    fn agent_computer_scorecard_blocks_untrusted_product_density() {
+        let samples = agent_computer_scorecard_samples((1..=100_u32).map(f64::from))
+            .into_iter()
+            .map(|sample| {
+                if sample.metric() == "density.max_agent_computers_before_ready_p95_doubles" {
+                    sample.with_static_tag("ready_signal", "request_fifo_acceptance")
+                } else {
+                    sample
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let report = AgentComputerScorecardReport::from_samples(samples)
+            .expect("agent-computer scorecard report");
+
+        assert!(
+            report
+                .promotion_blockers()
+                .iter()
+                .any(|blocker| blocker.metric()
+                    == "density.max_agent_computers_before_ready_p95_doubles"
+                    && blocker.blocker().contains("lacks signed-live"))
+        );
+    }
+
+    #[test]
+    fn agent_computer_scorecard_blocks_missing_product_density_capacity_tiers() {
+        let samples = agent_computer_scorecard_samples((1..=100_u32).map(f64::from))
+            .into_iter()
+            .filter(|sample| {
+                !sample
+                    .metric()
+                    .starts_with("debug.product.agent_computer_ready_deck_c")
+            })
+            .collect::<Vec<_>>();
+
+        let report = AgentComputerScorecardReport::from_samples(samples)
+            .expect("agent-computer scorecard report");
+
+        assert!(
+            report
+                .promotion_blockers()
+                .iter()
+                .any(|blocker| blocker.metric()
+                    == "density.max_agent_computers_before_ready_p95_doubles"
+                    && blocker.blocker().contains("missing c4"))
         );
     }
 

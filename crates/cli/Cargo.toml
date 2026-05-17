@@ -1,15 +1,11 @@
 [package]
 name = "firkin-cli"
 description = "Development CLI for exercising the firkin Rust containerization library"
-version = "0.0.1-alpha"
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
-publish = false
 
 [[bin]]
 name = "fk"
@@ -17,8 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true, features = ["derive", "env"] }
-firkin = { path = "../firkin", version = "0.0.1-alpha" }
-firkin-runtime = { path = "../runtime", version = "0.0.1-alpha" }
+firkin = { path = "../firkin", version = "0.1.0" }
+firkin-runtime = { path = "../runtime", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }

@@ -9,9 +9,13 @@ use crate::control_plane::ControlPlaneHttpServer;
 #[allow(unused_imports)]
 use crate::full_body;
 #[allow(unused_imports)]
-use firkin_e2b_contract::PortProxyStream;
+use bytes::Bytes;
 #[allow(unused_imports)]
 use firkin_e2b_contract::RuntimeAdapter;
+#[allow(unused_imports)]
+use firkin_e2b_contract::{PortProxyStream, PortTarget};
+#[allow(unused_imports)]
+use firkin_envd::DEFAULT_ENVD_PORT;
 #[allow(unused_imports)]
 use firkin_types::PortSandboxHost;
 #[allow(unused_imports)]
@@ -47,7 +51,7 @@ use rustls::ServerConfig;
 use std::collections::BTreeMap;
 #[allow(unused_imports)]
 use std::convert::Infallible;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 #[allow(unused_imports)]
 use std::io::{Cursor, Read as _, Write as _};
 #[allow(unused_imports)]
@@ -57,7 +61,7 @@ use std::num::NonZeroU16;
 #[allow(unused_imports)]
 use std::path::Path;
 #[allow(unused_imports)]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 #[allow(unused_imports)]
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 #[allow(unused_imports)]
@@ -69,12 +73,21 @@ use tokio::sync::Mutex;
 #[allow(unused_imports)]
 use tokio_rustls::TlsAcceptor;
 /// Hyper-backed HTTP proxy for E2B `{port}-{sandboxID}.{domain}` traffic.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DomainProxyHttpServer<A> {
     #[allow(missing_docs)]
     pub backend: Arc<Mutex<LocalRuntimeBackend<A>>>,
     #[allow(missing_docs)]
     pub domain: Hostname,
+    upstream_pool: Arc<DomainProxyUpstreamPool>,
+}
+impl<A> fmt::Debug for DomainProxyHttpServer<A> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DomainProxyHttpServer")
+            .field("domain", &self.domain)
+            .finish_non_exhaustive()
+    }
 }
 impl<A> DomainProxyHttpServer<A>
 where
@@ -83,7 +96,11 @@ where
     /// Construct an HTTP proxy around a local runtime backend.
     #[must_use]
     pub fn new(backend: Arc<Mutex<LocalRuntimeBackend<A>>>, domain: Hostname) -> Self {
-        Self { backend, domain }
+        Self {
+            backend,
+            domain,
+            upstream_pool: Arc::new(DomainProxyUpstreamPool::default()),
+        }
     }
     /// Construct a proxy sharing a control-plane server backend.
     #[must_use]
@@ -105,8 +122,9 @@ where
             let (stream, _) = listener.accept().await?;
             let backend = Arc::clone(&self.backend);
             let domain = self.domain.clone();
+            let upstream_pool = Arc::clone(&self.upstream_pool);
             tokio::spawn(async move {
-                serve_domain_proxy_stream(stream, backend, domain).await;
+                serve_domain_proxy_stream(stream, backend, domain, upstream_pool).await;
             });
         }
     }
@@ -126,9 +144,10 @@ where
             let acceptor = acceptor.clone();
             let backend = Arc::clone(&self.backend);
             let domain = self.domain.clone();
+            let upstream_pool = Arc::clone(&self.upstream_pool);
             tokio::spawn(async move {
                 if let Ok(stream) = acceptor.accept(stream).await {
-                    serve_domain_proxy_stream(stream, backend, domain).await;
+                    serve_domain_proxy_stream(stream, backend, domain, upstream_pool).await;
                 }
             });
         }
@@ -147,6 +166,77 @@ where
         Self::new(backend, domain).serve(listener).await
     }
 }
+type DomainProxyUpstreamRequestBody = Full<Bytes>;
+type DomainProxyUpstreamSender =
+    hyper::client::conn::http1::SendRequest<DomainProxyUpstreamRequestBody>;
+
+#[derive(Default)]
+struct DomainProxyUpstreamPool {
+    senders: StdMutex<BTreeMap<String, Vec<DomainProxyUpstreamSender>>>,
+}
+
+impl DomainProxyUpstreamPool {
+    async fn send_unary_response<C, Fut>(
+        &self,
+        key: String,
+        request: Request<DomainProxyUpstreamRequestBody>,
+        connect: C,
+    ) -> Result<Response<Bytes>, String>
+    where
+        C: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<PortProxyStream, String>> + Send,
+    {
+        let mut sender = match self.take_sender(&key) {
+            Some(sender) if !sender.is_closed() => sender,
+            Some(_) | None => open_upstream_sender(connect).await?,
+        };
+        let response = sender
+            .send_request(request)
+            .await
+            .map_err(|error| format!("proxy target request failed: {error}"))?;
+        let (parts, body) = response.into_parts();
+        let body = body
+            .collect()
+            .await
+            .map_err(|error| format!("failed to read proxy target response body: {error}"))?
+            .to_bytes();
+        self.return_sender(key, sender);
+        Ok(Response::from_parts(parts, body))
+    }
+
+    fn take_sender(&self, key: &str) -> Option<DomainProxyUpstreamSender> {
+        self.senders
+            .lock()
+            .expect("domain proxy upstream pool mutex poisoned")
+            .get_mut(key)
+            .and_then(Vec::pop)
+    }
+
+    fn return_sender(&self, key: String, sender: DomainProxyUpstreamSender) {
+        self.senders
+            .lock()
+            .expect("domain proxy upstream pool mutex poisoned")
+            .entry(key)
+            .or_default()
+            .push(sender);
+    }
+}
+
+async fn open_upstream_sender<C, Fut>(connect: C) -> Result<DomainProxyUpstreamSender, String>
+where
+    C: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<PortProxyStream, String>> + Send,
+{
+    let stream = connect().await?;
+    let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|error| format!("failed to open proxy target connection: {error}"))?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    Ok(sender)
+}
+
 /// PEM certificate and private-key material for the E2B domain proxy TLS listener.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DomainProxyTlsIdentity {
@@ -215,6 +305,7 @@ async fn serve_domain_proxy_stream<A, S>(
     stream: S,
     backend: Arc<Mutex<LocalRuntimeBackend<A>>>,
     domain: Hostname,
+    upstream_pool: Arc<DomainProxyUpstreamPool>,
 ) where
     A: RuntimeAdapter,
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -222,7 +313,12 @@ async fn serve_domain_proxy_stream<A, S>(
     let service = service_fn(move |request| {
         let backend = Arc::clone(&backend);
         let domain = domain.clone();
-        async move { Ok::<_, Infallible>(handle_domain_proxy_request(backend, &domain, request).await) }
+        let upstream_pool = Arc::clone(&upstream_pool);
+        async move {
+            Ok::<_, Infallible>(
+                handle_domain_proxy_request(backend, &domain, upstream_pool, request).await,
+            )
+        }
     });
     let stream = TokioIo::new(stream);
     if let Err(_error) = hyper::server::conn::http1::Builder::new()
@@ -234,6 +330,7 @@ async fn serve_domain_proxy_stream<A, S>(
 async fn handle_domain_proxy_request<A>(
     backend: Arc<Mutex<LocalRuntimeBackend<A>>>,
     domain: &Hostname,
+    upstream_pool: Arc<DomainProxyUpstreamPool>,
     request: Request<Incoming>,
 ) -> Response<HttpBody>
 where
@@ -254,16 +351,48 @@ where
             return proxy_error_to_http(StatusCode::BAD_GATEWAY, &error.to_string());
         }
     };
-    proxy_to_stream(request, move || {
-        let adapter = adapter.clone();
-        async move {
-            adapter
-                .connect_port_target(sandbox_id.as_str(), target)
-                .await
-                .map_err(|error| error.to_string())
-        }
-    })
+    let pool_key = request_pool_key(&request, &route, &target);
+    proxy_to_stream(
+        request,
+        move || {
+            let adapter = adapter.clone();
+            async move {
+                adapter
+                    .connect_port_target(sandbox_id.as_str(), target)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        },
+        pool_key.map(|key| (upstream_pool, key)),
+    )
     .await
+}
+
+fn request_pool_key<B>(
+    request: &Request<B>,
+    route: &PortSandboxHost,
+    target: &PortTarget,
+) -> Option<String> {
+    if request.method() != Method::POST
+        || route.port().get() != DEFAULT_ENVD_PORT
+        || request.uri().path() != "/process.Process/SendInput"
+    {
+        return None;
+    }
+    Some(format!(
+        "{}|{}|{}",
+        route.sandbox_id().as_str(),
+        route.port().get(),
+        port_target_pool_key(target)
+    ))
+}
+
+fn port_target_pool_key(target: &PortTarget) -> String {
+    match target {
+        PortTarget::Tcp { host, port } => format!("tcp:{host}:{port}"),
+        PortTarget::Vsock { cid, port } => format!("vsock:{cid}:{port}"),
+        PortTarget::UnixSocket { path } => format!("unix:{path}"),
+    }
 }
 fn request_route<B>(request: &Request<B>, domain: &Hostname) -> Result<PortSandboxHost, String> {
     match request_host(request).and_then(|host| {
@@ -315,7 +444,11 @@ fn request_host<B>(request: &Request<B>) -> Result<String, String> {
         .to_owned())
 }
 
-async fn proxy_to_stream<C, Fut>(request: Request<Incoming>, connect: C) -> Response<HttpBody>
+async fn proxy_to_stream<C, Fut>(
+    request: Request<Incoming>,
+    connect: C,
+    pool_route: Option<(Arc<DomainProxyUpstreamPool>, String)>,
+) -> Response<HttpBody>
 where
     C: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<PortProxyStream, String>> + Send,
@@ -326,9 +459,13 @@ where
     if request.method() == Method::CONNECT {
         return proxy_connect_to_stream(request, connect);
     }
-    proxy_http_to_stream(request, connect).await
+    proxy_http_to_stream(request, connect, pool_route).await
 }
-async fn proxy_http_to_stream<C, Fut>(request: Request<Incoming>, connect: C) -> Response<HttpBody>
+async fn proxy_http_to_stream<C, Fut>(
+    request: Request<Incoming>,
+    connect: C,
+    pool_route: Option<(Arc<DomainProxyUpstreamPool>, String)>,
+) -> Response<HttpBody>
 where
     C: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<PortProxyStream, String>> + Send,
@@ -343,25 +480,6 @@ where
             );
         }
     };
-    let stream = match connect().await {
-        Ok(stream) => stream,
-        Err(error) => {
-            return proxy_error_to_http(StatusCode::BAD_GATEWAY, &error);
-        }
-    };
-    let (mut sender, connection) =
-        match hyper::client::conn::http1::handshake(TokioIo::new(stream)).await {
-            Ok(parts) => parts,
-            Err(error) => {
-                return proxy_error_to_http(
-                    StatusCode::BAD_GATEWAY,
-                    &format!("failed to open proxy target connection: {error}"),
-                );
-            }
-        };
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
     let mut builder = Request::builder().method(parts.method);
     let uri = parts.uri.path_and_query().map_or_else(
         || Uri::from_static("/"),
@@ -384,6 +502,31 @@ where
             );
         }
     };
+    if let Some((pool, key)) = pool_route {
+        return match pool.send_unary_response(key, upstream, connect).await {
+            Ok(response) => response_with_full_body(response),
+            Err(error) => proxy_error_to_http(StatusCode::BAD_GATEWAY, &error),
+        };
+    }
+    let stream = match connect().await {
+        Ok(stream) => stream,
+        Err(error) => {
+            return proxy_error_to_http(StatusCode::BAD_GATEWAY, &error);
+        }
+    };
+    let (mut sender, connection) =
+        match hyper::client::conn::http1::handshake(TokioIo::new(stream)).await {
+            Ok(parts) => parts,
+            Err(error) => {
+                return proxy_error_to_http(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("failed to open proxy target connection: {error}"),
+                );
+            }
+        };
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
     let response = match sender.send_request(upstream).await {
         Ok(response) => response,
         Err(error) => {
@@ -403,6 +546,17 @@ where
             body.map_err(|error| -> BoxError { Box::new(error) })
                 .boxed(),
         )
+        .expect("proxy target response status/header values were already validated")
+}
+
+fn response_with_full_body(response: Response<Bytes>) -> Response<HttpBody> {
+    let (parts, body) = response.into_parts();
+    let mut builder = Response::builder().status(parts.status);
+    for (name, value) in &parts.headers {
+        builder = builder.header(name, value);
+    }
+    builder
+        .body(full_body(body))
         .expect("proxy target response status/header values were already validated")
 }
 async fn proxy_websocket_to_stream<C, Fut>(
@@ -633,10 +787,67 @@ fn proxy_error_to_http(status: StatusCode, message: &str) -> Response<HttpBody> 
         .body(full_body(body))
         .expect("static proxy error response is valid")
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use firkin_types::{ContainerId, hostname};
+
+    fn envd_route() -> PortSandboxHost {
+        PortSandboxHost::new(
+            NonZeroU16::new(DEFAULT_ENVD_PORT).expect("envd port is non-zero"),
+            ContainerId::new("sbx_firkin_1").expect("test sandbox id is valid"),
+            hostname!("cube.localhost"),
+        )
+    }
+
+    fn tcp_target() -> PortTarget {
+        PortTarget::Tcp {
+            host: "127.0.0.1".to_owned(),
+            port: 39001,
+        }
+    }
+
+    #[test]
+    fn request_pool_key_accepts_only_envd_send_input_unary_posts() {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/process.Process/SendInput")
+            .body(())
+            .expect("test request is valid");
+
+        assert_eq!(
+            request_pool_key(&request, &envd_route(), &tcp_target()),
+            Some("sbx_firkin_1|49983|tcp:127.0.0.1:39001".to_owned())
+        );
+    }
+
+    #[test]
+    fn request_pool_key_rejects_non_send_input_paths() {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/process.Process/Start")
+            .body(())
+            .expect("test request is valid");
+
+        assert_eq!(
+            request_pool_key(&request, &envd_route(), &tcp_target()),
+            None
+        );
+    }
+
+    #[test]
+    fn request_pool_key_rejects_non_post_send_input_requests() {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/process.Process/SendInput")
+            .body(())
+            .expect("test request is valid");
+
+        assert_eq!(
+            request_pool_key(&request, &envd_route(), &tcp_target()),
+            None
+        );
+    }
 
     #[test]
     fn request_route_falls_back_to_sdk_sandbox_headers_for_local_override_url() {

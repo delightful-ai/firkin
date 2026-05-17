@@ -235,14 +235,21 @@ pub trait RuntimeAdapter: Clone + Send + Sync + 'static {
         target: PortTarget,
     ) -> Result<PortProxyStream, BackendError> {
         match target {
-            PortTarget::Tcp { host, port } => TcpStream::connect((host.as_str(), port))
-                .await
-                .map(|stream| Box::new(stream) as PortProxyStream)
-                .map_err(|error| {
+            PortTarget::Tcp { host, port } => {
+                let stream = TcpStream::connect((host.as_str(), port))
+                    .await
+                    .map_err(|error| {
+                        BackendError::Runtime(format!(
+                            "failed to connect proxy target {host}:{port}: {error}"
+                        ))
+                    })?;
+                stream.set_nodelay(true).map_err(|error| {
                     BackendError::Runtime(format!(
-                        "failed to connect proxy target {host}:{port}: {error}"
+                        "failed to configure proxy target {host}:{port} TCP_NODELAY: {error}"
                     ))
-                }),
+                })?;
+                Ok(Box::new(stream) as PortProxyStream)
+            }
             PortTarget::UnixSocket { path } => UnixStream::connect(&path)
                 .await
                 .map(|stream| Box::new(stream) as PortProxyStream)

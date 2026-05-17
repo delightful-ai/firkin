@@ -1,20 +1,16 @@
 [package]
 name = "firkin-admission"
-description = "Admission control and capacity accounting for Firkin sandboxes"
-version = "0.0.1-alpha"
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
 
 [lib]
 name = "firkin_admission"
 path = "src/lib.rs"
 
 [dependencies]
-firkin-types = { path = "../types", version = "0.0.1-alpha" }
+firkin-types = { path = "../types", version = "0.1.0" }
 thiserror.workspace = true
-firkin-artifacts = { path = "../artifacts", version = "0.0.1-alpha" }
+firkin-artifacts = { path = "../artifacts", version = "0.1.0" }

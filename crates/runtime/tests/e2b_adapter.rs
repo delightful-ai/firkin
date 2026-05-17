@@ -1,9 +1,9 @@
 //! E2B `RuntimeAdapter` integration tests for the Firkin runtime crate.
 //!
-//! These tests were written against a local, unpublished E2B Rust SDK checkout
-//! during Firkin development. They stay in the tree as compatibility evidence,
-//! but are disabled in the standalone release candidate until they can target a
-//! published SDK crate or a small in-repo compatibility harness.
+//! Scaffolding: this compatibility suite targets the E2B Rust SDK surface. Keep
+//! it outside the default standalone graph until it can depend on a published
+//! SDK crate instead of a local development checkout.
+
 #![cfg(any())]
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -38,7 +38,7 @@ use firkin_runtime::{
 use firkin_template::SnapshotSinkError;
 use firkin_trace::{
     BenchmarkMetricKind, BenchmarkSample, BenchmarkUnit, EventTraceRecorder, SandboxEventName,
-    SandboxEventTrace, SandboxTraceEvent,
+    SandboxEventTrace, SandboxTraceEvent, WorkloadClass,
 };
 use firkin_types::{NetworkPolicyRule, SandboxNetworkPolicy, Size, hostname};
 use prost::Message;
@@ -435,8 +435,9 @@ impl RuntimeCommandRunner for RoutedSession {
     async fn run_command(
         &mut self,
         request: &EnvdProcessStartRequest,
-        mut event_trace: EventTraceRecorder,
+        event_trace: EventTraceRecorder,
     ) -> Result<RuntimeCommandStartReport, Self::Error> {
+        let mut event_trace = classify_command_trace_for_request(request, event_trace);
         let mut argv = Vec::with_capacity(request.args.len().saturating_add(1));
         argv.push(request.cmd.clone());
         argv.extend(request.args.iter().cloned());
@@ -475,8 +476,9 @@ impl RuntimeCommandStreamRunner for RoutedSession {
     async fn run_command_stream(
         &mut self,
         request: &EnvdProcessStartRequest,
-        mut event_trace: EventTraceRecorder,
+        event_trace: EventTraceRecorder,
     ) -> Result<RuntimeCommandStreamStartReport, Self::Error> {
+        let mut event_trace = classify_command_trace_for_request(request, event_trace);
         let mut argv = Vec::with_capacity(request.args.len().saturating_add(1));
         argv.push(request.cmd.clone());
         argv.extend(request.args.iter().cloned());
@@ -541,6 +543,20 @@ fn record_command_events(event_trace: &mut EventTraceRecorder) {
     event_trace.record(SandboxEventName::ProcessExited);
 }
 
+fn classify_command_trace_for_request(
+    request: &EnvdProcessStartRequest,
+    event_trace: EventTraceRecorder,
+) -> EventTraceRecorder {
+    if event_trace.has_recorded_events() || event_trace.workload() != WorkloadClass::TinyExec {
+        return event_trace;
+    }
+    if diagnostic_shell_kind(request).is_some() {
+        event_trace.with_future_workload(WorkloadClass::ShellExec)
+    } else {
+        event_trace.with_future_workload(WorkloadClass::DirectExec)
+    }
+}
+
 fn diagnostic_command_samples(request: &EnvdProcessStartRequest) -> Vec<BenchmarkSample> {
     let args = request.args.join("|||");
     let mut samples = vec![
@@ -558,13 +574,13 @@ fn diagnostic_command_samples(request: &EnvdProcessStartRequest) -> Vec<Benchmar
         );
     } else {
         samples.push(tagged_sample(
-            "debug.exec.direct_command_start_ms",
+            "exec.direct_command_start_ms",
             3.0,
             request,
             &args,
         ));
         samples.push(tagged_sample(
-            "debug.exec.direct_first_stdout_byte_ms",
+            "exec.direct_first_stdout_byte_ms",
             5.0,
             request,
             &args,
@@ -2436,7 +2452,7 @@ async fn runtime_adapter_command_start_records_command_latency_samples() {
             "first_stdout_byte",
             "debug.exec.shell_command_start_ms",
             "debug.exec.shell_first_stdout_byte_ms",
-            "sandbox.start.resume_snapshot_to_first_stdout_ms",
+            "start.resume_to_first_stdout_ms",
             "debug.exec.sandbox_first_command_start_ms",
             "debug.exec.sandbox_first_stdout_byte_ms"
         ]
@@ -2545,8 +2561,8 @@ async fn runtime_adapter_direct_exec_records_tagged_diagnostic_samples() {
     let samples = adapter.benchmark_samples().await;
     let direct_first_stdout = samples
         .iter()
-        .find(|sample| sample.metric() == "debug.exec.direct_first_stdout_byte_ms")
-        .expect("direct first stdout diagnostic sample");
+        .find(|sample| sample.metric() == "exec.direct_first_stdout_byte_ms")
+        .expect("direct first stdout sample");
 
     assert_eq!(output.pid, 41);
     assert_eq!(
@@ -2554,10 +2570,12 @@ async fn runtime_adapter_direct_exec_records_tagged_diagnostic_samples() {
         Some("/usr/bin/printf")
     );
     assert_eq!(direct_first_stdout.tag_value("args"), Some("ok"));
-    assert!(samples.iter().any(
-        |sample| sample.metric() == "debug.exec.direct_command_start_ms"
-            && sample.tag_value("cmd") == Some("/usr/bin/printf")
-    ));
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample.metric() == "exec.direct_command_start_ms"
+                && sample.tag_value("cmd") == Some("/usr/bin/printf"))
+    );
     assert!(samples.iter().any(|sample| sample.metric()
         == "debug.exec.sandbox_first_stdout_byte_ms"
         && sample.tag_value("cmd") == Some("/usr/bin/printf")
@@ -2709,8 +2727,8 @@ async fn runtime_adapter_command_start_retains_raw_event_trace() {
         .expect("command starts");
     adapter
         .start_process(EnvdProcessStartRequest {
-            cmd: "/bin/sh".to_owned(),
-            args: vec!["-lc".to_owned(), "printf ok again".to_owned()],
+            cmd: "/usr/bin/printf".to_owned(),
+            args: vec!["ok again".to_owned()],
             ..EnvdProcessStartRequest::default()
         })
         .await
@@ -2762,8 +2780,8 @@ async fn runtime_adapter_command_start_retains_raw_event_trace() {
         .map(|sample| sample.metric().to_owned())
         .collect::<Vec<_>>();
     assert!(derived_metrics.contains(&"start.warm_to_first_stdout_ms".to_owned()));
-    assert!(derived_metrics.contains(&"exec.command_start_ms".to_owned()));
-    assert!(derived_metrics.contains(&"exec.first_stdout_byte_ms".to_owned()));
+    assert!(derived_metrics.contains(&"exec.direct_command_start_ms".to_owned()));
+    assert!(derived_metrics.contains(&"exec.direct_first_stdout_byte_ms".to_owned()));
 }
 
 #[tokio::test]
@@ -2999,6 +3017,29 @@ async fn runtime_adapter_interactive_process_routes_input_signal_pty_and_connect
             rows: 30,
             cols: 100
         })]
+    );
+    assert_runtime_stdin_write_sample(&adapter).await;
+}
+
+async fn assert_runtime_stdin_write_sample(adapter: &FirkinRuntimeAdapter<RecordingLauncher>) {
+    let stdin_samples = adapter
+        .benchmark_samples()
+        .await
+        .into_iter()
+        .filter(|sample| sample.metric() == "sandbox.exec.stdin_write_latency_ms")
+        .collect::<Vec<_>>();
+    assert_eq!(stdin_samples.len(), 1);
+    assert_eq!(
+        stdin_samples[0].tag_value("measurement_boundary"),
+        Some("runtime_process_write_flush")
+    );
+    assert_eq!(
+        stdin_samples[0].tag_value("excludes_client_http"),
+        Some("true")
+    );
+    assert_eq!(
+        stdin_samples[0].tag_value("excludes_envd_rpc_decode"),
+        Some("true")
     );
 }
 

@@ -1,9 +1,5 @@
 //! State-store tests for the single-node runtime facade.
 
-#![cfg(any())]
-// Scaffolding: this runtime integration test depends on firkin-single-node.
-// It is disabled during the crates.io bootstrap to keep the publish graph acyclic.
-
 use std::fs;
 
 use firkin_single_node::{

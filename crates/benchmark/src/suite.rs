@@ -61,14 +61,13 @@ const fn case(
 pub const AGENT_CORE_CASES: &[BenchmarkCaseDefinition] = &[
     case("hot_to_first_stdout", "start.hot_to_first_stdout_ms", BenchmarkExecutionMode::GuestAgentRequired, "hot-lease-to-first-stdout"),
     case("hot_to_ready", "start.hot_to_ready_ms", BenchmarkExecutionMode::GuestAgentRequired, "hot-lease-to-exec-proven-ready"),
-    case("resume_to_first_stdout", "start.resume_to_first_stdout_ms", BenchmarkExecutionMode::GuestAgentRequired, "snapshot-restore-start-to-first-stdout"),
     case("warm_to_first_stdout", "start.warm_to_first_stdout_ms", BenchmarkExecutionMode::GuestAgentRequired, "warm-request-start-to-first-stdout"),
     case("agent_task_ready", "start.agent_task_ready_ms", BenchmarkExecutionMode::GuestAgentRequired, "external-request-to-first-useful-stdout"),
     case("pool_lease", "pool.lease_ms", BenchmarkExecutionMode::LiveVmRequired, "pool-lease-only-latency"),
-    case("exec_command_start", "exec.command_start_ms", BenchmarkExecutionMode::GuestAgentRequired, "exec-request-to-process-start"),
-    case("exec_first_stdout", "exec.first_stdout_byte_ms", BenchmarkExecutionMode::GuestAgentRequired, "exec-request-to-first-stdout-byte"),
+    case("direct_exec_command_start", "exec.direct_command_start_ms", BenchmarkExecutionMode::GuestAgentRequired, "direct-exec-request-to-process-start"),
+    case("direct_exec_first_stdout", "exec.direct_first_stdout_byte_ms", BenchmarkExecutionMode::GuestAgentRequired, "direct-exec-request-to-first-stdout-byte"),
     case("exec_batch_100", "exec.batch_100_small_commands_ms", BenchmarkExecutionMode::GuestAgentRequired, "retained-shell-batch-100-small-command-wall-clock"),
-    case("density_hot_stdout", "density.max_active_before_hot_to_first_stdout_p95_doubles", BenchmarkExecutionMode::LiveVmRequired, "hot-to-first-stdout-concurrency-breakpoint"),
+    case("density_retained_shell_stdout", "density.max_active_before_retained_shell_first_stdout_p95_doubles", BenchmarkExecutionMode::LiveVmRequired, "retained-shell-first-stdout-concurrency-breakpoint"),
     case("sparse_bloat_after_trim", "disk.sparse_bloat_after_trim", BenchmarkExecutionMode::GuestAgentRequired, "post-fstrim-sparse-bloat-ratio"),
     case("trim_reclaim_bytes", "disk.host_bytes_reclaimed_after_trim", BenchmarkExecutionMode::GuestAgentRequired, "host-bytes-reclaimed-by-fstrim"),
     case("cleanup_leftover", "cleanup.leftover_bytes", BenchmarkExecutionMode::HostRunnable, "run-scoped-leftover-bytes-after-destroy"),
@@ -78,6 +77,7 @@ pub const AGENT_CORE_CASES: &[BenchmarkCaseDefinition] = &[
 #[rustfmt::skip]
 pub const STARTUP_CASES: &[BenchmarkCaseDefinition] = &[
     case("total", "sandbox.start.total_ms", BenchmarkExecutionMode::LiveVmRequired, "request-to-ready-total"),
+    case("raw_snapshot_resume_to_first_stdout", "start.resume_to_first_stdout_ms", BenchmarkExecutionMode::GuestAgentRequired, "raw-snapshot-restore-start-to-first-stdout"),
     case("image_resolve", "sandbox.start.image_resolve_ms", BenchmarkExecutionMode::HostRunnable, "oci-manifest-resolve"),
     case("image_pull", "sandbox.start.image_pull_ms", BenchmarkExecutionMode::ExternalToolRequired, "registry-fetch"),
     case("rootfs_prepare", "sandbox.start.rootfs_prepare_ms", BenchmarkExecutionMode::HostRunnable, "rootfs-materialization"),
@@ -220,6 +220,7 @@ pub const DENSITY_CASES: &[BenchmarkCaseDefinition] = &[
     case("task_wall_p95", "sandbox.density.task_wall_p95_by_concurrency_ms", BenchmarkExecutionMode::LiveVmRequired, "task-p95-by-concurrency"),
     case("idle_breakpoint", "sandbox.density.max_idle_hot_sandboxes_before_pressure", BenchmarkExecutionMode::LiveVmRequired, "idle-hot-sandbox-breakpoint"),
     case("active_breakpoint", "density.max_active_before_hot_to_first_stdout_p95_doubles", BenchmarkExecutionMode::LiveVmRequired, "hot-to-first-stdout-active-breakpoint"),
+    case("retained_shell_breakpoint", "density.max_active_before_retained_shell_first_stdout_p95_doubles", BenchmarkExecutionMode::GuestAgentRequired, "retained-shell-first-stdout-active-breakpoint"),
     case("idle_per_gb", "sandbox.density.sandboxes_per_gb_idle", BenchmarkExecutionMode::HostRunnable, "idle-sandboxes-per-gb"),
     case("throughput", "sandbox.density.tasks_per_minute", BenchmarkExecutionMode::LiveVmRequired, "tasks-per-minute"),
     case("degradation", "sandbox.density.p95_degradation_per_doubling", BenchmarkExecutionMode::LiveVmRequired, "tail-degradation-slope"),

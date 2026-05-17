@@ -1,14 +1,11 @@
 [package]
 name = "firkin-envd"
 description = "Protocol-level envd process and filesystem contracts for Firkin data planes"
-version = "0.0.1-alpha"
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
 
 [lib]
 name = "firkin_envd"
