@@ -2,7 +2,7 @@ use std::fs::OpenOptions;
 use std::net::Ipv4Addr;
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
@@ -130,21 +130,93 @@ unsafe impl RefEncode for InAddr {
 const VMNET_SHARED_MODE: u32 = 1001;
 const VMNET_SUCCESS: u32 = 1000;
 
-#[link(name = "vmnet", kind = "framework")]
-unsafe extern "C" {
-    fn vmnet_network_configuration_create(
-        mode: u32,
-        status: *mut u32,
-    ) -> VmnetNetworkConfigurationRef;
-    fn vmnet_network_configuration_disable_dhcp(cfg: VmnetNetworkConfigurationRef);
-    fn vmnet_network_configuration_set_ipv4_subnet(
-        cfg: VmnetNetworkConfigurationRef,
-        subnet: *const InAddr,
-        mask: *const InAddr,
-    ) -> u32;
-    fn vmnet_network_create(cfg: VmnetNetworkConfigurationRef, status: *mut u32)
-    -> VmnetNetworkRef;
-    fn vmnet_network_get_ipv4_subnet(net: VmnetNetworkRef, subnet: *mut InAddr, mask: *mut InAddr);
+type VmnetNetworkConfigurationCreate =
+    unsafe extern "C" fn(u32, *mut u32) -> VmnetNetworkConfigurationRef;
+type VmnetNetworkConfigurationDisableDhcp = unsafe extern "C" fn(VmnetNetworkConfigurationRef);
+type VmnetNetworkConfigurationSetIpv4Subnet =
+    unsafe extern "C" fn(VmnetNetworkConfigurationRef, *const InAddr, *const InAddr) -> u32;
+type VmnetNetworkCreate =
+    unsafe extern "C" fn(VmnetNetworkConfigurationRef, *mut u32) -> VmnetNetworkRef;
+type VmnetNetworkGetIpv4Subnet = unsafe extern "C" fn(VmnetNetworkRef, *mut InAddr, *mut InAddr);
+
+#[derive(Clone, Copy)]
+struct VmnetSymbols {
+    _framework: *mut libc::c_void,
+    network_configuration_create: VmnetNetworkConfigurationCreate,
+    network_configuration_disable_dhcp: VmnetNetworkConfigurationDisableDhcp,
+    network_configuration_set_ipv4_subnet: VmnetNetworkConfigurationSetIpv4Subnet,
+    network_create: VmnetNetworkCreate,
+    network_get_ipv4_subnet: VmnetNetworkGetIpv4Subnet,
+}
+
+// SAFETY: The handle points at the process-wide vmnet framework image opened
+// by dyld. It is never closed and the function pointers are immutable.
+unsafe impl Send for VmnetSymbols {}
+
+// SAFETY: See `Send`; all fields are process-stable code or image handles.
+unsafe impl Sync for VmnetSymbols {}
+
+fn vmnet_symbols() -> Result<VmnetSymbols> {
+    static SYMBOLS: OnceLock<Result<VmnetSymbols>> = OnceLock::new();
+    SYMBOLS
+        .get_or_init(load_vmnet_symbols)
+        .as_ref()
+        .copied()
+        .map_err(Clone::clone)
+}
+
+fn load_vmnet_symbols() -> Result<VmnetSymbols> {
+    let framework = load_vmnet_framework()?;
+    Ok(VmnetSymbols {
+        _framework: framework,
+        network_configuration_create: load_vmnet_symbol(
+            framework,
+            "vmnet_network_configuration_create",
+        )?,
+        network_configuration_disable_dhcp: load_vmnet_symbol(
+            framework,
+            "vmnet_network_configuration_disable_dhcp",
+        )?,
+        network_configuration_set_ipv4_subnet: load_vmnet_symbol(
+            framework,
+            "vmnet_network_configuration_set_ipv4_subnet",
+        )?,
+        network_create: load_vmnet_symbol(framework, "vmnet_network_create")?,
+        network_get_ipv4_subnet: load_vmnet_symbol(framework, "vmnet_network_get_ipv4_subnet")?,
+    })
+}
+
+fn load_vmnet_framework() -> Result<*mut libc::c_void> {
+    let path = std::ffi::CString::new("/System/Library/Frameworks/vmnet.framework/vmnet")
+        .expect("vmnet framework path never contains nul");
+    // SAFETY: The path is a nul-terminated constant and dyld owns the returned
+    // image handle for the lifetime of the process.
+    let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    if handle.is_null() {
+        return Err(Error::UnclassifiedVz {
+            reason: "vmnet framework is unavailable".into(),
+        });
+    }
+    Ok(handle)
+}
+
+fn load_vmnet_symbol<T>(framework: *mut libc::c_void, name: &'static str) -> Result<T>
+where
+    T: Copy,
+{
+    let symbol_name = std::ffi::CString::new(name).expect("vmnet symbol names never contain nul");
+    // SAFETY: `framework` is a live dlopen handle and the cast is bounded by
+    // the concrete `VmnetSymbols` table above, whose signatures match
+    // vmnet.framework.
+    let symbol = unsafe { libc::dlsym(framework, symbol_name.as_ptr()) };
+    if symbol.is_null() {
+        return Err(Error::UnclassifiedVz {
+            reason: format!("vmnet framework symbol {name} is unavailable"),
+        });
+    }
+    // SAFETY: `symbol` is non-null and the caller chose `T` from the vmnet
+    // function pointer table above.
+    Ok(unsafe { std::mem::transmute_copy::<*mut libc::c_void, T>(&symbol) })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1154,11 +1226,12 @@ struct VmnetSetup {
 }
 
 fn vmnet_setup(subnet: Option<&str>, index: usize) -> Result<VmnetSetup> {
+    let vmnet = vmnet_symbols()?;
     let mut status = 0_u32;
     // SAFETY: vmnet returns an owned opaque configuration reference or null
     // with a status code.
     let configuration =
-        unsafe { vmnet_network_configuration_create(VMNET_SHARED_MODE, &raw mut status) };
+        unsafe { (vmnet.network_configuration_create)(VMNET_SHARED_MODE, &raw mut status) };
     if configuration.is_null() {
         return Err(Error::UnclassifiedVz {
             reason: format!(
@@ -1171,14 +1244,14 @@ fn vmnet_setup(subnet: Option<&str>, index: usize) -> Result<VmnetSetup> {
 
     // SAFETY: The configuration reference is valid and owned by this setup.
     unsafe {
-        vmnet_network_configuration_disable_dhcp(configuration);
+        (vmnet.network_configuration_disable_dhcp)(configuration);
     }
 
     if let Some(subnet) = subnet {
         let (gateway, mask) = explicit_vmnet_subnet(subnet)?;
         // SAFETY: vmnet reads the two in_addr values during this call only.
         let status = unsafe {
-            vmnet_network_configuration_set_ipv4_subnet(
+            (vmnet.network_configuration_set_ipv4_subnet)(
                 configuration,
                 &raw const gateway,
                 &raw const mask,
@@ -1198,7 +1271,7 @@ fn vmnet_setup(subnet: Option<&str>, index: usize) -> Result<VmnetSetup> {
     let mut status = 0_u32;
     // SAFETY: vmnet returns an owned opaque network reference or null with a
     // status code. The reference must outlive the VZ attachment.
-    let network = unsafe { vmnet_network_create(configuration, &raw mut status) };
+    let network = unsafe { (vmnet.network_create)(configuration, &raw mut status) };
     if network.is_null() {
         return Err(Error::UnclassifiedVz {
             reason: format!(
@@ -1214,7 +1287,7 @@ fn vmnet_setup(subnet: Option<&str>, index: usize) -> Result<VmnetSetup> {
     // SAFETY: The network reference is valid and vmnet writes both in_addr
     // outputs synchronously.
     unsafe {
-        vmnet_network_get_ipv4_subnet(network, &raw mut subnet_addr, &raw mut mask_addr);
+        (vmnet.network_get_ipv4_subnet)(network, &raw mut subnet_addr, &raw mut mask_addr);
     }
     let (lower, _mask, prefix) = subnet_host_order(subnet_addr, mask_addr);
     let gateway = lower | 1;
