@@ -32,9 +32,7 @@ jobs:
         run: brew install protobuf
 
       - name: Build CLI without embedded runtime artifacts
-        env:
-          RUSTFLAGS: "-l framework=vmnet"
-        run: cargo build -p firkin-cli --release
+        run: cargo rustc -p firkin-cli --release --bin fk -- -C link-arg=-framework -C link-arg=vmnet
 
       - name: Package facade tarball
         run: cargo package -p firkin
