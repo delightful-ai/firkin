@@ -1,6 +1,6 @@
 # Publishing Runbook
 
-This is the manual release runbook for `0.0.1` and later alpha releases.
+This is the manual release runbook for `0.0.1` and later unstable releases.
 
 1. Verify the repository is clean and on `main`.
 2. Run local gates:
@@ -38,7 +38,35 @@ This is the manual release runbook for `0.0.1` and later alpha releases.
 
 ## 0.0.2 Status
 
-`0.0.2` contains the public-release fixes for runtime vmnet symbol resolution and deterministic `.localhost` E2B proxy preflight. Publish this version after the final release gates pass.
+`0.0.2` was published to crates.io on 2026-05-17 after:
+
+```bash
+cargo metadata --format-version 1
+cargo fmt --check
+scripts/check-firkin-crate-graph.sh
+git diff --check
+CARGO_TARGET_DIR=/tmp/firkin-0.0.2-target cargo check --workspace --all-targets
+CARGO_TARGET_DIR=/tmp/firkin-0.0.2-clippy-target cargo clippy --workspace --all-targets -- -D warnings
+CARGO_TARGET_DIR=/tmp/firkin-0.0.2-test-target cargo test --workspace
+```
+
+`0.0.2` contains the public-release fixes for runtime vmnet symbol resolution
+and deterministic `.localhost` E2B proxy preflight.
+
+External consumer proof:
+
+```bash
+rm -rf /tmp/firkin-consumer-smoke-002
+cargo new /tmp/firkin-consumer-smoke-002 --bin
+cd /tmp/firkin-consumer-smoke-002
+cargo add firkin@0.0.2
+cargo add tokio@1 --features macros,rt-multi-thread
+cargo check
+cargo run
+```
+
+This proof compiled and ran without `path`, `patch.crates-io`, or git
+dependencies.
 
 ## 0.0.1 Status
 
