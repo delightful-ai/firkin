@@ -325,6 +325,14 @@ struct BenchmarkSprintReadyArgs {
     /// Optional scorecard artifact carrying exact required P0 metrics.
     #[arg(long)]
     scorecard_artifact: Option<PathBuf>,
+    /// Durable state root to preflight. Defaults to `$FIRKIN_STATE_DIR` or
+    /// `~/.firkin/state`.
+    #[arg(long)]
+    state_root: Option<PathBuf>,
+    /// Rebuildable cache root to preflight. Defaults to `$FIRKIN_CACHE_DIR` or
+    /// `~/.firkin/cache`.
+    #[arg(long)]
+    cache_root: Option<PathBuf>,
     /// Benchmark artifact root. Defaults to `$FIRKIN_BENCHMARK_DIR` or `~/.firkin/benchmarks`.
     #[arg(long)]
     benchmark_root: Option<PathBuf>,
@@ -353,6 +361,14 @@ struct BenchmarkSprintRecordArgs {
     /// Optional scorecard artifact carrying exact required P0 metrics.
     #[arg(long)]
     scorecard_artifact: Option<PathBuf>,
+    /// Durable state root to preflight. Defaults to `$FIRKIN_STATE_DIR` or
+    /// `~/.firkin/state`.
+    #[arg(long)]
+    state_root: Option<PathBuf>,
+    /// Rebuildable cache root to preflight. Defaults to `$FIRKIN_CACHE_DIR` or
+    /// `~/.firkin/cache`.
+    #[arg(long)]
+    cache_root: Option<PathBuf>,
     /// Markdown output path.
     #[arg(long)]
     out: PathBuf,
@@ -3638,8 +3654,8 @@ fn write_benchmark_sprint_ready(
     }
     let doctor_args = BenchmarkDoctorArgs {
         mode: args.mode,
-        state_root: None,
-        cache_root: None,
+        state_root: args.state_root.clone(),
+        cache_root: args.cache_root.clone(),
         benchmark_root: Some(root.clone()),
         min_free_bytes: args.min_free_bytes,
     };
@@ -3796,6 +3812,8 @@ fn write_benchmark_sprint_record(
         current_artifact: Some(args.current_artifact.clone()),
         overhead_artifact: Some(args.overhead_artifact.clone()),
         scorecard_artifact: args.scorecard_artifact.clone(),
+        state_root: args.state_root.clone(),
+        cache_root: args.cache_root.clone(),
         benchmark_root: Some(root),
         min_free_bytes: args.min_free_bytes,
     };
@@ -6121,6 +6139,8 @@ mod tests {
         let current_artifact = tempdir.path().join("current.json");
         let overhead_artifact = tempdir.path().join("overhead.json");
         let benchmark_root = tempdir.path().join("benchmarks");
+        let state_root = tempdir.path().join("state");
+        let cache_root = tempdir.path().join("cache");
         write_lifecycle_artifact_with_value(&baseline_artifact, 10.0);
         write_lifecycle_artifact_with_value(&current_artifact, 10.0);
         write_overhead_artifact_with_value(&overhead_artifact, 0.1);
@@ -6143,6 +6163,8 @@ mod tests {
                 current_artifact: Some(current_artifact),
                 overhead_artifact: Some(overhead_artifact),
                 scorecard_artifact: None,
+                state_root: Some(state_root),
+                cache_root: Some(cache_root),
                 benchmark_root: Some(benchmark_root),
                 min_free_bytes: 0,
             },
@@ -6173,6 +6195,8 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let baseline_artifact = tempdir.path().join("baseline.json");
         let benchmark_root = tempdir.path().join("benchmarks");
+        let state_root = tempdir.path().join("state");
+        let cache_root = tempdir.path().join("cache");
         write_lifecycle_artifact_with_value(&baseline_artifact, 10.0);
         save_benchmark_baseline(
             &BenchmarkBaselineSaveArgs {
@@ -6193,6 +6217,8 @@ mod tests {
                 current_artifact: None,
                 overhead_artifact: None,
                 scorecard_artifact: None,
+                state_root: Some(state_root),
+                cache_root: Some(cache_root),
                 benchmark_root: Some(benchmark_root),
                 min_free_bytes: u64::MAX,
             },
@@ -6221,6 +6247,8 @@ mod tests {
         let scorecard_artifact = tempdir.path().join("scorecard.json");
         let out = tempdir.path().join("sprint.md");
         let benchmark_root = tempdir.path().join("benchmarks");
+        let state_root = tempdir.path().join("state");
+        let cache_root = tempdir.path().join("cache");
         write_lifecycle_artifact_with_values(&baseline_artifact, (1..=100_u32).map(f64::from));
         write_lifecycle_artifact_with_values(&current_artifact, (2..=101_u32).map(f64::from));
         write_overhead_artifact_with_value(&overhead_artifact, 0.1);
@@ -6244,6 +6272,8 @@ mod tests {
                 current_artifact: current_artifact.clone(),
                 overhead_artifact: overhead_artifact.clone(),
                 scorecard_artifact: Some(scorecard_artifact.clone()),
+                state_root: Some(state_root),
+                cache_root: Some(cache_root),
                 out: out.clone(),
                 benchmark_root: Some(benchmark_root),
                 min_free_bytes: 0,
@@ -6299,6 +6329,8 @@ mod tests {
                 current_artifact: tempdir.path().join("missing-current.json"),
                 overhead_artifact,
                 scorecard_artifact: None,
+                state_root: None,
+                cache_root: None,
                 out: out.clone(),
                 benchmark_root: Some(benchmark_root),
                 min_free_bytes: 0,
