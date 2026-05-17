@@ -358,6 +358,14 @@ impl AppleVzLocalRuntimeDriver {
     }
 
     fn prepare_product_pod_store(options: &PodStoreOptions, staging_dir: &Path) -> Result<PathBuf> {
+        Self::prepare_product_pod_store_with_converter(options, staging_dir, convert_disk_image)
+    }
+
+    fn prepare_product_pod_store_with_converter(
+        options: &PodStoreOptions,
+        staging_dir: &Path,
+        convert: impl FnOnce(&DiskImageConversion) -> firkin_vmm::Result<()>,
+    ) -> Result<PathBuf> {
         if !options.shared_rootfs {
             return Err(Error::UnsupportedCapability(
                 "Apple/VZ product pods require sharedRootfs=true".to_owned(),
@@ -374,7 +382,7 @@ impl AppleVzLocalRuntimeDriver {
                 let raw_path = staging_dir.join("pod-store.raw.ext4");
                 let asif_path = staging_dir.join("pod-store.asif");
                 Self::write_empty_pod_store(&raw_path, size)?;
-                convert_disk_image(&DiskImageConversion::asif(&raw_path, &asif_path))
+                convert(&DiskImageConversion::asif(&raw_path, &asif_path))
                     .map_err(|error| runtime_error("convert pod-store ext4 to ASIF", error))?;
                 fs::remove_file(&raw_path)
                     .map_err(|error| runtime_error("remove intermediate raw pod-store", error))?;
@@ -2348,7 +2356,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
     fn asif_product_pod_store_converts_raw_ext4_and_removes_source() {
         let temp = tempfile::tempdir().unwrap();
         let options = PodStoreOptions {
@@ -2356,9 +2363,21 @@ mod tests {
             size_bytes: 64 * 1024 * 1024,
             ..PodStoreOptions::default()
         };
+        let raw_path = temp.path().join("pod-store.raw.ext4");
+        let asif_path = temp.path().join("pod-store.asif");
 
-        let path =
-            AppleVzLocalRuntimeDriver::prepare_product_pod_store(&options, temp.path()).unwrap();
+        let path = AppleVzLocalRuntimeDriver::prepare_product_pod_store_with_converter(
+            &options,
+            temp.path(),
+            |conversion| {
+                assert_eq!(conversion.source(), raw_path);
+                assert_eq!(conversion.destination(), asif_path);
+                assert_eq!(conversion.format(), firkin_vmm::DiskImageFormat::Asif);
+                std::fs::copy(conversion.source(), conversion.destination()).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "pod-store.asif");
         assert!(path.exists());
