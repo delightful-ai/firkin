@@ -5,7 +5,7 @@ pub(crate) mod disk_image;
 pub(crate) mod vz;
 pub use disk_image::{
     BlankDiskImage, DiskImageConversion, DiskImageFormat, convert_disk_image,
-    create_blank_disk_image,
+    create_blank_disk_image, diskutil_supports_asif_conversion,
 };
 #[allow(unused_imports)]
 pub use firkin_types::{VmId, VsockPort};

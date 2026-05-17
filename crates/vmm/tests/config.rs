@@ -9,7 +9,8 @@ use firkin_types::{Size, VirtiofsTag, VmId, VsockPort};
 use firkin_vmm::{
     BlankDiskImage, DiskImageConversion, DiskImageFormat, Error, HostArch, KernelImage, Network,
     Preflight, Running, VirtualMachine, VmConfig, VmPhase, VmStatistics, VsockListener,
-    convert_disk_image, create_blank_disk_image, preflight, signing,
+    convert_disk_image, create_blank_disk_image, diskutil_supports_asif_conversion, preflight,
+    signing,
 };
 
 #[test]
@@ -157,6 +158,11 @@ fn asif_disk_image_conversion_records_paths_and_format() {
 #[test]
 #[cfg(target_os = "macos")]
 fn convert_raw_disk_image_to_asif_preserves_block_contents() {
+    if !diskutil_supports_asif_conversion() {
+        eprintln!("skipping ASIF conversion integration check: diskutil does not advertise ASIF");
+        return;
+    }
+
     let dir = tempfile::tempdir().expect("dir");
     let source = dir.path().join("source.raw");
     let asif = dir.path().join("converted.asif");

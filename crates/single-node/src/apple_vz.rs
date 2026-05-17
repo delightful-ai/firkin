@@ -16,7 +16,10 @@ use firkin_core::{
 use firkin_ext4::Writer;
 use firkin_trace::{BenchmarkMetricKind, BenchmarkSample, BenchmarkUnit};
 use firkin_types::{BlockDeviceId, SandboxNetworkPolicy, Size};
-use firkin_vmm::{DiskImageConversion, KernelImage, VmConfig, VmConfigBuilder, convert_disk_image};
+use firkin_vmm::{
+    DiskImageConversion, KernelImage, VmConfig, VmConfigBuilder, convert_disk_image,
+    diskutil_supports_asif_conversion,
+};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -988,28 +991,39 @@ impl RuntimeDriver for AppleVzLocalRuntimeDriver {
 #[async_trait]
 impl RuntimeAdapter for AppleVzLocalRuntimeDriver {
     async fn preflight(&self) -> std::result::Result<RuntimeCapabilitySet, E2bBackendError> {
+        let asif_supported = diskutil_supports_asif_conversion();
+        let mut supported = vec![
+            "single-vm-backed-container".to_owned(),
+            "product-pods".to_owned(),
+            "pod-emptydir".to_owned(),
+            "pod-guest-path-rootfs".to_owned(),
+            "pod-shared-rootfs-template".to_owned(),
+            "pod-store-raw-size".to_owned(),
+            "pod-store-trim-on-remove".to_owned(),
+        ];
+        let mut unsupported = vec![
+            (
+                "prepared-template-pods".to_owned(),
+                "Apple/VZ product pods currently pull OCI template ids directly".to_owned(),
+            ),
+            (
+                "pod-snapshot-restore".to_owned(),
+                "pod-aware snapshot restore is not wired in the single-node driver".to_owned(),
+            ),
+        ];
+        if asif_supported {
+            supported.push("pod-store-asif".to_owned());
+        } else {
+            unsupported.push((
+                "pod-store-asif".to_owned(),
+                "host diskutil does not advertise ASIF conversion support".to_owned(),
+            ));
+        }
+
         Ok(RuntimeCapabilitySet {
             backend: "apple-vz-single-node".to_owned(),
-            supported: vec![
-                "single-vm-backed-container".to_owned(),
-                "product-pods".to_owned(),
-                "pod-emptydir".to_owned(),
-                "pod-guest-path-rootfs".to_owned(),
-                "pod-shared-rootfs-template".to_owned(),
-                "pod-store-asif".to_owned(),
-                "pod-store-raw-size".to_owned(),
-                "pod-store-trim-on-remove".to_owned(),
-            ],
-            unsupported: vec![
-                (
-                    "prepared-template-pods".to_owned(),
-                    "Apple/VZ product pods currently pull OCI template ids directly".to_owned(),
-                ),
-                (
-                    "pod-snapshot-restore".to_owned(),
-                    "pod-aware snapshot restore is not wired in the single-node driver".to_owned(),
-                ),
-            ],
+            supported,
+            unsupported,
         })
     }
 
@@ -2431,16 +2445,31 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
-            capabilities
-                .supported
-                .contains(&"pod-store-asif".to_owned())
-        );
-        assert!(
-            !capabilities
-                .unsupported
-                .iter()
-                .any(|(name, _reason)| name == "pod-store-asif")
-        );
+        if diskutil_supports_asif_conversion() {
+            assert!(
+                capabilities
+                    .supported
+                    .contains(&"pod-store-asif".to_owned())
+            );
+            assert!(
+                !capabilities
+                    .unsupported
+                    .iter()
+                    .any(|(name, _reason)| name == "pod-store-asif")
+            );
+        } else {
+            assert!(
+                !capabilities
+                    .supported
+                    .contains(&"pod-store-asif".to_owned())
+            );
+            assert!(
+                capabilities
+                    .unsupported
+                    .iter()
+                    .any(|(name, reason)| name == "pod-store-asif"
+                        && reason.contains("ASIF conversion support"))
+            );
+        }
     }
 }

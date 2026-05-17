@@ -176,6 +176,19 @@ pub fn convert_disk_image(spec: &DiskImageConversion) -> Result<()> {
     ))
 }
 
+/// Return whether this host `diskutil` advertises ASIF conversion support.
+#[must_use]
+pub fn diskutil_supports_asif_conversion() -> bool {
+    let output = Command::new("diskutil")
+        .args(["image", "create", "from", "--help"])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    let help = String::from_utf8_lossy(&output.stdout);
+    help.contains("\"ASIF\"") || help.contains(" ASIF") || help.contains("[ASIF")
+}
+
 fn create_blank_raw_disk_image(spec: &BlankDiskImage) -> Result<()> {
     let file = std::fs::OpenOptions::new()
         .write(true)
