@@ -42,7 +42,10 @@ fn freshness_sync_executor_fast_forwards_checkout_and_unlocks_writes() {
 fn committed_repo() -> tempfile::TempDir {
     let source = tempfile::tempdir().expect("source");
     fs::write(source.path().join("README.md"), "template").expect("readme");
-    run_git(["init", "--quiet"], source.path());
+    run_git(
+        ["init", "--quiet", "--initial-branch", "main"],
+        source.path(),
+    );
     run_git(["add", "."], source.path());
     run_git_commit("init", source.path());
     source
