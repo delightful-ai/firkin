@@ -88,7 +88,7 @@ The repository should contain:
 - `.github/workflows/publish.yml` for manual crates.io publication with the
   `crates-io` environment and `CRATES_IO_TOKEN` secret.
 - `.github/workflows/release.yml` for draft prerelease artifacts on
-  `v0.1.0*` tags.
+  `v0.0.1*` tags.
 
 After push, confirm:
 

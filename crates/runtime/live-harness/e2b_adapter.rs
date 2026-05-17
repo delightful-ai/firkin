@@ -1,10 +1,8 @@
-//! E2B `RuntimeAdapter` integration tests for the Firkin runtime crate.
+//! E2B `RuntimeAdapter` live-harness coverage for the Firkin runtime crate.
 //!
-//! Scaffolding: this compatibility suite targets the E2B Rust SDK surface. Keep
-//! it outside the default standalone graph until it can depend on a published
+//! Scaffolding: this compatibility suite targets the E2B Rust SDK surface and
+//! lives outside Cargo's default test graph until it can depend on a published
 //! SDK crate instead of a local development checkout.
-
-#![cfg(any())]
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};

@@ -1,4 +1,3 @@
-use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::net::Ipv4Addr;
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
@@ -10,7 +9,7 @@ use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::encode::{Encoding, RefEncode};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{AnyThread, ClassType, Ivars, define_class, msg_send};
+use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send};
 use objc2_foundation::{
     NSArray, NSData, NSError, NSFileHandle, NSObject, NSObjectProtocol, NSString, NSURL,
 };
@@ -672,8 +671,7 @@ pub(crate) fn build_configuration(config: &VmConfig) -> Result<VzConfiguration> 
 #[allow(dead_code)]
 pub(crate) async fn start(start: VzStart) -> Result<VmRuntime> {
     let configuration = start.configuration;
-    let queue_label = CString::new("dev.firkin.vmm.vm").expect("static queue label");
-    let queue = DispatchQueue::new(Some(queue_label.as_c_str()), DispatchQueueAttr::SERIAL);
+    let queue = DispatchQueue::new("dev.firkin.vmm.vm", DispatchQueueAttr::SERIAL);
 
     // SAFETY: The configuration has already passed VZ validation, and the
     // queue is a private serial queue retained by VmRuntime for the VM life.
@@ -741,8 +739,7 @@ pub(crate) async fn start(start: VzStart) -> Result<VmRuntime> {
 #[cfg(feature = "snapshot")]
 pub(crate) async fn restore(prepared: VzStart, snapshot_path: &Path) -> Result<VmRuntime> {
     let configuration = prepared.configuration;
-    let queue_label = CString::new("dev.firkin.vmm.vm").expect("static queue label");
-    let queue = DispatchQueue::new(Some(queue_label.as_c_str()), DispatchQueueAttr::SERIAL);
+    let queue = DispatchQueue::new("dev.firkin.vmm.vm", DispatchQueueAttr::SERIAL);
     let snapshot_url = ns_url_file(snapshot_path)?;
 
     // SAFETY: The configuration has already passed VZ validation, and the
@@ -813,15 +810,19 @@ struct RegisteredListener {
     _delegate: VzSend<Retained<ListenerDelegate>>,
 }
 
+#[derive(Debug)]
+struct ListenerDelegateIvars {
+    port: u32,
+    sender: ListenerSender,
+}
+
 define_class!(
     // SAFETY: The delegate only duplicates an fd and pushes it through a
     // tokio channel. All Objective-C references are callback-borrowed.
     #[unsafe(super(NSObject))]
+    #[ivars = ListenerDelegateIvars]
     #[derive(Debug)]
-    struct ListenerDelegate {
-        port: u32,
-        sender: ListenerSender,
-    }
+    struct ListenerDelegate;
 
     unsafe impl NSObjectProtocol for ListenerDelegate {}
 
@@ -834,13 +835,14 @@ define_class!(
             connection: &VZVirtioSocketConnection,
             _socket_device: &VZVirtioSocketDevice,
         ) -> bool {
-            let port = VsockPort::new(*self.port());
+            let ivars = self.ivars();
+            let port = VsockPort::new(ivars.port);
             match accepted_fd(port, connection) {
                 Ok(fd) => {
                     let peer = crate::VsockPeer::new(3, port);
-                    self.sender().try_send(Ok((fd, peer))).is_ok()
+                    ivars.sender.try_send(Ok((fd, peer))).is_ok()
                 }
-                Err(error) => self.sender().try_send(Err(error)).is_ok(),
+                Err(error) => ivars.sender.try_send(Err(error)).is_ok(),
             }
         }
     }
@@ -848,7 +850,7 @@ define_class!(
 
 impl ListenerDelegate {
     fn new(port: VsockPort, sender: ListenerSender) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(Ivars::<Self> {
+        let this = Self::alloc().set_ivars(ListenerDelegateIvars {
             port: port.get(),
             sender,
         });

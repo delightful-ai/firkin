@@ -1,7 +1,7 @@
 [package]
 name = "firkin-cli"
 description = "Development CLI for exercising the firkin Rust containerization library"
-version = "0.1.0"
+version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,8 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true, features = ["derive", "env"] }
-firkin = { path = "../firkin", version = "0.1.0" }
-firkin-runtime = { path = "../runtime", version = "0.1.0" }
+firkin = { path = "../firkin", version = "0.0.1" }
+firkin-runtime = { path = "../runtime", version = "0.0.1" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }

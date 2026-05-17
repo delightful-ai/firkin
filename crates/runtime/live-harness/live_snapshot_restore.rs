@@ -1,9 +1,8 @@
-//! Ignored live VZ snapshot restore tests for the runtime crate.
-
-#![cfg(any())]
-// Scaffolding: this signed Apple/VZ integration suite mixes runtime, benchmark,
-// single-node, and E2B SDK compatibility coverage. Keep it out of the default
-// package graph until it moves under a dedicated live harness.
+//! Signed live VZ snapshot restore harness for the runtime crate.
+//!
+//! Scaffolding: this signed Apple/VZ integration suite mixes runtime, benchmark,
+//! single-node, and E2B SDK compatibility coverage. It lives outside Cargo's
+//! default test graph until it moves under a dedicated live harness crate.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;

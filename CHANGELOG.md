@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0
+## 0.0.1
 
 - Extract Firkin as a standalone Rust workspace under `delightful-ai/firkin`.
 - Package the current macOS Apple/VZ agent sandbox library surface without the
