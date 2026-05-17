@@ -5035,6 +5035,17 @@ fn preflight_e2b_proxy_domain(
     domain: &Hostname,
     proxy_addr: SocketAddr,
 ) -> Result<(), Box<dyn Error>> {
+    if domain.as_str().ends_with(".localhost") || domain.as_str() == "localhost" {
+        return if proxy_addr.ip().is_loopback() {
+            Ok(())
+        } else {
+            Err(format!(
+                "E2B proxy domain `{domain}` is a localhost domain, but {proxy_addr} is not proxy listener on a loopback address; configure local DNS or pass --skip-domain-preflight for a deliberately external proxy"
+            )
+            .into())
+        };
+    }
+
     let probe_host = format!("49983-sbx_probe.{domain}");
     let resolved = (probe_host.as_str(), proxy_addr.port())
         .to_socket_addrs()

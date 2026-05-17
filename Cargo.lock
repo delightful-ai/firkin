@@ -596,7 +596,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "firkin"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "firkin-admission",
  "firkin-artifacts",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-admission"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "firkin-artifacts",
  "firkin-types",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-artifacts"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-benchmark"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "firkin-e2b-contract",
  "firkin-e2b-server",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-cli"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "clap",
  "firkin",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-core"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "firkin-ext4",
  "firkin-oci",
@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-e2b-contract"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-e2b-server"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -744,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-e2b-wire"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bytes",
  "firkin-types",
@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-envd"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "serde",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-evidence"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "firkin-trace",
  "serde",
@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-ext4"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bitflags",
  "bytemuck",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-hygiene"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "firkin-artifacts",
  "flate2",
@@ -800,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-oci"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "firkin-ext4",
  "firkin-types",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-runtime"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-sandbox"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-single-node"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-template"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "firkin-artifacts",
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-trace"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-types"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-vminitd-bytes"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "sha2",
  "ureq",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-vminitd-client"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bitflags",
  "firkin-oci",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-vmm"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "block2",
  "dispatch2",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "firkin-vsock"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-stream",
  "firkin-types",

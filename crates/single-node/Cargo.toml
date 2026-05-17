@@ -1,7 +1,7 @@
 [package]
 name = "firkin-single-node"
 description = "Production Apple/VZ runtime composition for the firkin Rust containerization library"
-version = "0.0.1"
+version = "0.0.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -19,23 +19,23 @@ snapshot = ["firkin-core/snapshot"]
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
-firkin-admission = { path = "../admission", version = "0.0.1" }
-firkin-artifacts = { path = "../artifacts", version = "0.0.1" }
-firkin-core = { path = "../core", version = "0.0.1" }
-firkin-e2b-contract = { path = "../e2b-contract", version = "0.0.1" }
-firkin-e2b-server = { path = "../e2b-server", version = "0.0.1" }
-firkin-e2b-wire = { path = "../e2b-wire", version = "0.0.1" }
-firkin-envd = { path = "../envd", version = "0.0.1" }
-firkin-ext4 = { path = "../ext4", version = "0.0.1" }
-firkin-hygiene = { path = "../hygiene", version = "0.0.1" }
-firkin-oci = { path = "../oci", version = "0.0.1" }
-firkin-runtime = { path = "../runtime", version = "0.0.1" }
-firkin-sandbox = { path = "../sandbox", version = "0.0.1" }
-firkin-template = { path = "../template", version = "0.0.1" }
-firkin-trace = { path = "../trace", version = "0.0.1" }
-firkin-types = { path = "../types", version = "0.0.1" }
-firkin-vminitd-bytes = { path = "../vminitd-bytes", version = "0.0.1" }
-firkin-vmm = { path = "../vmm", version = "0.0.1" }
+firkin-admission = { path = "../admission", version = "0.0.2" }
+firkin-artifacts = { path = "../artifacts", version = "0.0.2" }
+firkin-core = { path = "../core", version = "0.0.2" }
+firkin-e2b-contract = { path = "../e2b-contract", version = "0.0.2" }
+firkin-e2b-server = { path = "../e2b-server", version = "0.0.2" }
+firkin-e2b-wire = { path = "../e2b-wire", version = "0.0.2" }
+firkin-envd = { path = "../envd", version = "0.0.2" }
+firkin-ext4 = { path = "../ext4", version = "0.0.2" }
+firkin-hygiene = { path = "../hygiene", version = "0.0.2" }
+firkin-oci = { path = "../oci", version = "0.0.2" }
+firkin-runtime = { path = "../runtime", version = "0.0.2" }
+firkin-sandbox = { path = "../sandbox", version = "0.0.2" }
+firkin-template = { path = "../template", version = "0.0.2" }
+firkin-trace = { path = "../trace", version = "0.0.2" }
+firkin-types = { path = "../types", version = "0.0.2" }
+firkin-vminitd-bytes = { path = "../vminitd-bytes", version = "0.0.2" }
+firkin-vmm = { path = "../vmm", version = "0.0.2" }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true

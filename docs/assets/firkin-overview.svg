@@ -3,7 +3,7 @@
   <desc id="desc">Rust facade, sandbox API, runtime, and Apple Virtualization layers for macOS agent sandboxes.</desc>
   <rect width="1080" height="420" fill="#101418"/>
   <rect x="48" y="56" width="984" height="308" rx="18" fill="#182026" stroke="#32414b" stroke-width="2"/>
-  <text x="72" y="102" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="24" fill="#eef5f7">Firkin 0.0.1</text>
+  <text x="72" y="102" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="24" fill="#eef5f7">Firkin 0.0.2</text>
   <text x="72" y="132" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#9fb0ba">Rust-first macOS agent sandbox library</text>
   <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">
     <rect x="72" y="178" width="178" height="72" rx="10" fill="#d7f9f1"/>

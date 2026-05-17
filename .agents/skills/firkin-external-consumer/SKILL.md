@@ -20,7 +20,7 @@ dependencies for the proof.
 rm -rf /tmp/firkin-consumer-smoke
 cargo new /tmp/firkin-consumer-smoke --bin
 cd /tmp/firkin-consumer-smoke
-cargo add firkin@0.0.1
+cargo add firkin@0.0.2
 cargo add tokio@1 --features macros,rt-multi-thread
 ```
 
@@ -55,6 +55,6 @@ cargo run
 
 ## CLI Install Smoke
 
-The `fk` CLI crate is not published in `0.0.1`; it is built from the repo
+The `fk` CLI crate is not published in `0.0.2`; it is built from the repo
 release workflow. Do not use `cargo install firkin-cli` as a success criterion
 for this alpha unless `publish = false` is intentionally removed later.
