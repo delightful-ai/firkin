@@ -1,7 +1,7 @@
 [package]
 name = "firkin-runtime"
 description = "Production Apple/VZ runtime composition for the firkin Rust containerization library"
-version = "0.0.2"
+version = "0.0.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -18,27 +18,27 @@ snapshot = ["firkin-core/snapshot"]
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
-firkin-core = { path = "../core", version = "0.0.2" }
-firkin-ext4 = { path = "../ext4", version = "0.0.2" }
-firkin-oci = { path = "../oci", version = "0.0.2" }
-firkin-template = { path = "../template", version = "0.0.2" }
-firkin-trace = { path = "../trace", version = "0.0.2" }
-firkin-types = { path = "../types", version = "0.0.2" }
-firkin-vminitd-bytes = { path = "../vminitd-bytes", version = "0.0.2" }
-firkin-vmm = { path = "../vmm", version = "0.0.2" }
+firkin-core = { path = "../core", version = "0.0.3" }
+firkin-ext4 = { path = "../ext4", version = "0.0.3" }
+firkin-oci = { path = "../oci", version = "0.0.3" }
+firkin-template = { path = "../template", version = "0.0.3" }
+firkin-trace = { path = "../trace", version = "0.0.3" }
+firkin-types = { path = "../types", version = "0.0.3" }
+firkin-vminitd-bytes = { path = "../vminitd-bytes", version = "0.0.3" }
+firkin-vmm = { path = "../vmm", version = "0.0.3" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["formatting"] }
 tokio = { workspace = true, features = ["fs", "io-util", "net", "rt", "sync", "time"] }
 uuid.workspace = true
-firkin-admission = { path = "../admission", version = "0.0.2" }
-firkin-artifacts = { path = "../artifacts", version = "0.0.2" }
-firkin-hygiene = { path = "../hygiene", version = "0.0.2" }
-firkin-e2b-contract = { path = "../e2b-contract", version = "0.0.2" }
-firkin-e2b-server = { path = "../e2b-server", version = "0.0.2" }
-firkin-e2b-wire = { path = "../e2b-wire", version = "0.0.2" }
-firkin-envd = { path = "../envd", version = "0.0.2" }
+firkin-admission = { path = "../admission", version = "0.0.3" }
+firkin-artifacts = { path = "../artifacts", version = "0.0.3" }
+firkin-hygiene = { path = "../hygiene", version = "0.0.3" }
+firkin-e2b-contract = { path = "../e2b-contract", version = "0.0.3" }
+firkin-e2b-server = { path = "../e2b-server", version = "0.0.3" }
+firkin-e2b-wire = { path = "../e2b-wire", version = "0.0.3" }
+firkin-envd = { path = "../envd", version = "0.0.3" }
 
 [dev-dependencies]
 futures-util.workspace = true

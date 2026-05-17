@@ -1,7 +1,7 @@
 [package]
 name = "firkin-e2b-wire"
 description = "Wire protocol shapes for E2B-compatible firkin sandbox APIs"
-version = "0.0.2"
+version = "0.0.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 bytes.workspace = true
-firkin-types = { path = "../types", version = "0.0.2", features = ["serde"] }
+firkin-types = { path = "../types", version = "0.0.3", features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 tar.workspace = true

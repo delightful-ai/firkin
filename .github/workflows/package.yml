@@ -53,6 +53,7 @@ jobs:
           crates=(
             firkin-vsock
             firkin-ext4
+            firkin-vmm
             firkin-oci
             firkin-vminitd-client
             firkin-sandbox

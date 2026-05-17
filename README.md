@@ -7,7 +7,7 @@ proofs when you opt into them, and no Swift service payload.
 
 ![Firkin architecture](docs/assets/firkin-overview.svg)
 
-> `0.0.2` is still pre-1.0 and intentionally unstable. The crate graph is publishable, but
+> `0.0.3` is still pre-1.0 and intentionally unstable. The crate graph is publishable, but
 > public APIs, runtime artifact distribution, and the agent-sandbox control
 > surface can still change without compatibility shims.
 
@@ -44,7 +44,7 @@ binaries. Live VM flows need pinned release URLs, `FIRKIN_VMINITD_PATH` plus
 Library consumer:
 
 ```bash
-cargo add firkin@0.0.2
+cargo add firkin@0.0.3
 ```
 
 Compile-only smoke:
@@ -137,14 +137,14 @@ The detailed topology contract lives in
 
 ## Publishing Status
 
-`0.0.2` is published in dependency order on crates.io. GitHub Actions
+`0.0.3` is published in dependency order on crates.io. GitHub Actions
 provide:
 
 - `CI`: macOS Rust metadata, fmt, crate graph, check, clippy, tests, examples.
 - `Package dry run`: package tarball checks for publishable crates.
 - `Publish crates`: manual crates.io publish job using a `CRATES_IO_TOKEN`
   secret and the `crates-io` environment.
-- `Release`: draft prerelease artifacts for `v0.0.2*` tags.
+- `Release`: draft prerelease artifacts for `v0.0.3*` tags.
 
 The concrete operator flows are also recorded as repo skills under
 `.agents/skills/`.

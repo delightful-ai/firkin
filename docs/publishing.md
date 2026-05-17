@@ -36,22 +36,23 @@ This is the manual release runbook for `0.0.1` and later unstable releases.
 6. Create the release tag only after dry-runs pass.
 7. Let the release workflow create the GitHub release and attach assets.
 
-## 0.0.2 Status
+## 0.0.3 Status
 
-`0.0.2` was published to crates.io on 2026-05-17 after:
+`0.0.3` was published to crates.io on 2026-05-17 after:
 
 ```bash
 cargo metadata --format-version 1
 cargo fmt --check
 scripts/check-firkin-crate-graph.sh
 git diff --check
-CARGO_TARGET_DIR=/tmp/firkin-0.0.2-target cargo check --workspace --all-targets
-CARGO_TARGET_DIR=/tmp/firkin-0.0.2-clippy-target cargo clippy --workspace --all-targets -- -D warnings
-CARGO_TARGET_DIR=/tmp/firkin-0.0.2-test-target cargo test --workspace
+CARGO_TARGET_DIR=/tmp/firkin-0.0.3-target cargo check --workspace --all-targets
+CARGO_TARGET_DIR=/tmp/firkin-0.0.3-clippy-target cargo clippy --workspace --all-targets -- -D warnings
+CARGO_TARGET_DIR=/tmp/firkin-0.0.3-test-target cargo test --workspace
 ```
 
-`0.0.2` contains the public-release fixes for runtime vmnet symbol resolution
-and deterministic `.localhost` E2B proxy preflight.
+`0.0.3` contains the public-release fixes for runtime vmnet symbol resolution,
+host-probed ASIF pod-store capability reporting, host-independent ASIF tests,
+and isolated benchmark sprint preflight roots.
 
 External consumer proof:
 
@@ -59,7 +60,7 @@ External consumer proof:
 rm -rf /tmp/firkin-consumer-smoke-002
 cargo new /tmp/firkin-consumer-smoke-002 --bin
 cd /tmp/firkin-consumer-smoke-002
-cargo add firkin@0.0.2
+cargo add firkin@0.0.3
 cargo add tokio@1 --features macros,rt-multi-thread
 cargo check
 cargo run
@@ -118,7 +119,7 @@ External consumer proof:
 rm -rf /tmp/firkin-consumer-smoke
 cargo new /tmp/firkin-consumer-smoke --bin
 cd /tmp/firkin-consumer-smoke
-cargo add firkin@0.0.2
+cargo add firkin@0.0.1
 cargo add tokio@1 --features macros,rt-multi-thread
 cargo check
 cargo run

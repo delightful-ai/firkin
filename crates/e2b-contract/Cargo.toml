@@ -1,7 +1,7 @@
 [package]
 name = "firkin-e2b-contract"
 description = "E2B-compatible sandbox contract types for the firkin Rust containerization library"
-version = "0.0.2"
+version = "0.0.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,10 +14,10 @@ path = "src/lib.rs"
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
-firkin-types = { path = "../types", version = "0.0.2", features = ["serde"] }
+firkin-types = { path = "../types", version = "0.0.3", features = ["serde"] }
 serde.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["formatting"] }
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "sync", "time"] }
-firkin-e2b-wire = { path = "../e2b-wire", version = "0.0.2" }
+firkin-e2b-wire = { path = "../e2b-wire", version = "0.0.3" }
