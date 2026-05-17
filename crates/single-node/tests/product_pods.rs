@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use firkin_single_node::AppleVzLocalRuntimeDriver;
+use firkin_vmm::diskutil_supports_asif_conversion;
 use {
     firkin_e2b_server::{LocalRuntimeBackend, PodRoutes},
     firkin_e2b_wire::{
@@ -55,17 +56,32 @@ async fn apple_vz_product_pod_route_reports_asif_support() {
         .await
         .expect("Apple/VZ preflight should succeed without booting");
 
-    assert!(
-        capabilities
-            .supported
-            .contains(&"pod-store-asif".to_owned())
-    );
-    assert!(
-        !capabilities
-            .unsupported
-            .iter()
-            .any(|(name, _reason)| name == "pod-store-asif")
-    );
+    if diskutil_supports_asif_conversion() {
+        assert!(
+            capabilities
+                .supported
+                .contains(&"pod-store-asif".to_owned())
+        );
+        assert!(
+            !capabilities
+                .unsupported
+                .iter()
+                .any(|(name, _reason)| name == "pod-store-asif")
+        );
+    } else {
+        assert!(
+            !capabilities
+                .supported
+                .contains(&"pod-store-asif".to_owned())
+        );
+        assert!(
+            capabilities
+                .unsupported
+                .iter()
+                .any(|(name, reason)| name == "pod-store-asif"
+                    && reason.contains("ASIF conversion support"))
+        );
+    }
 }
 
 #[tokio::test]
